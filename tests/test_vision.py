@@ -300,3 +300,49 @@ def test_prepare_image_exif_rotation():
     exif[0x0112] = 6  # повернуть на 90 по часовой
     im.save(buf, "JPEG", exif=exif)
     assert Image.open(io.BytesIO(prepare_image(buf.getvalue()))).size == (100, 200)
+
+
+# ---------- финальная проверка: нечисла, подпись, бомба ----------
+
+@pytest.mark.parametrize("raw", [
+    _with_item(grams=200).replace('"grams": 200', '"grams": NaN'),
+    _with_item(kcal=230).replace('"kcal": 230', '"kcal": Infinity'),
+    _with_item(protein=7.0).replace('"protein": 7.0', '"protein": -Infinity'),
+    _with_item(fat=1.0).replace('"fat": 1.0', '"fat": NaN'),
+], ids=["grams-nan", "kcal-inf", "protein-neg-inf", "fat-nan"])
+def test_parse_non_finite_is_bad_response(raw):
+    assert "NaN" in raw or "Infinity" in raw
+    with pytest.raises(BadResponse):
+        parse_analysis(raw)
+
+
+async def test_openai_analyze_without_caption_sends_placeholder():
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json=_openai_body(GOOD_RAW))
+
+    c = KieOpenAIClient("gemini-3-pro", "KEY", _http(handler))
+    await c.analyze(b"\xff\xd8jpegbytes", None)
+    parts = seen["body"]["messages"][1]["content"]
+    assert [p["text"] for p in parts if p["type"] == "text"] == ["Подписи нет."]
+
+
+@pytest.mark.parametrize("side", [12, 20])  # 144 px — «предупреждение», 400 px — «ошибка» PIL
+def test_prepare_image_pixel_cap(monkeypatch, side):
+    from bot import vision
+
+    monkeypatch.setattr(vision, "MAX_PIXELS", 100)
+    buf = io.BytesIO()
+    Image.new("RGB", (side, side)).save(buf, "PNG")
+    with pytest.raises(vision.BadImage):
+        prepare_image(buf.getvalue())
+
+
+def test_prepare_image_restores_pil_cap():
+    buf = io.BytesIO()
+    Image.new("RGB", (10, 10)).save(buf, "PNG")
+    before = Image.MAX_IMAGE_PIXELS
+    prepare_image(buf.getvalue())
+    assert Image.MAX_IMAGE_PIXELS == before

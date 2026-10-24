@@ -4,7 +4,9 @@ import base64
 import io
 import json
 import logging
+import math
 import re
+import warnings
 from dataclasses import asdict
 from typing import Any, Protocol
 
@@ -21,6 +23,7 @@ MAX_GRAMS = 3000
 MAX_KCAL = 5000
 TIMEOUT_S = 45.0
 MAX_SIDE = 1280
+MAX_PIXELS = 40_000_000  # больше — считаем «бомбой» и не разжимаем
 
 
 class VisionError(Exception):
@@ -33,6 +36,10 @@ class BadResponse(VisionError):
 
 class NoCredits(VisionError):
     pass
+
+
+class BadImage(ValueError):
+    """Файл не картинка, битый или слишком большой по числу пикселей."""
 
 
 class VisionUnavailable(VisionError):
@@ -83,6 +90,8 @@ _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORE
 def _num(value: Any, limit: float | None = None) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise BadResponse("not a number")
+    if not math.isfinite(value):
+        raise BadResponse("not a finite number")
     if value < 0 or (limit is not None and value > limit):
         raise BadResponse("number out of range")
     return float(value)
@@ -145,12 +154,24 @@ def parse_analysis(raw: str) -> Analysis:
 # ---------- подготовка картинки ----------
 
 def prepare_image(data: bytes) -> bytes:
-    with Image.open(io.BytesIO(data)) as im:
-        im = ImageOps.exif_transpose(im)
-        im = im.convert("RGB")
-        im.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        im.save(out, "JPEG", quality=85)
+    """JPEG не больше ``MAX_SIDE`` по стороне; ``BadImage``, если файл не картинка или «бомба»."""
+    saved_cap = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as im:
+                im = ImageOps.exif_transpose(im)
+                im = im.convert("RGB")
+                im.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
+                out = io.BytesIO()
+                im.save(out, "JPEG", quality=85)
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
+        raise BadImage("too many pixels") from e
+    except (OSError, ValueError, SyntaxError) as e:  # PIL: не картинка или битый файл
+        raise BadImage(type(e).__name__) from e
+    finally:
+        Image.MAX_IMAGE_PIXELS = saved_cap
     return out.getvalue()
 
 
@@ -220,7 +241,7 @@ class KieOpenAIClient:
     async def analyze(self, image_jpeg: bytes, caption: str | None) -> Analysis:
         return await self._chat(
             [
-                {"type": "text", "text": caption or ""},
+                {"type": "text", "text": caption or "Подписи нет."},
                 {"type": "image_url",
                  "image_url": {"url": f"data:image/jpeg;base64,{_b64(image_jpeg)}"}},
             ]
