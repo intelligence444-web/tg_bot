@@ -1,8 +1,8 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from bot.models import Analysis, FoodItem, Meal, Norm, Profile, User
 
-UTC_T = datetime(2026, 10, 24, 9, 0)
+UTC_T = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
 
 
 def make_meal(meal_id: str, hour: int, day: date = date(2026, 10, 24), user_id: int = 1) -> Meal:
@@ -10,7 +10,7 @@ def make_meal(meal_id: str, hour: int, day: date = date(2026, 10, 24), user_id: 
     return Meal(
         user_id=user_id,
         meal_id=meal_id,
-        eaten_at=datetime(day.year, day.month, day.day, hour, 0),
+        eaten_at=datetime(day.year, day.month, day.day, hour, 0, tzinfo=timezone.utc),
         local_date=day,
         meal_type="lunch",
         analysis=Analysis(True, "high", (item,), False),
