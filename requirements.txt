@@ -1,0 +1,5 @@
+aiogram>=3.13,<4
+httpx>=0.27
+Pillow>=10
+matplotlib>=3.8
+ydb>=3.18
