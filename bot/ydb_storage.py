@@ -240,7 +240,8 @@ def meal_from_row(row: Mapping[str, Any]) -> Meal:
 # ---------- схема ----------
 
 
-def create_tables_queries(prefix: str = "") -> list[str]:
+def table_ddl(prefix: str = "") -> list[str]:
+    """DDL всех таблиц (единый источник: create_tables, scripts/create_tables.py --print-yql, docs/deploy.md)."""
     _check_prefix(prefix)
     queries = []
     for name, (columns, pk) in _TABLES.items():
@@ -252,8 +253,11 @@ def create_tables_queries(prefix: str = "") -> list[str]:
     return queries
 
 
+create_tables_queries = table_ddl  # прежнее имя
+
+
 async def create_tables(pool: ydb.aio.QuerySessionPool, prefix: str = "") -> None:
-    for query in create_tables_queries(prefix):
+    for query in table_ddl(prefix):
         await pool.execute_with_retries(query)
 
 

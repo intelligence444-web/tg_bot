@@ -1,0 +1,16 @@
+openapi: 3.0.0
+info:
+  title: calorie-bot
+  version: 1.0.0
+paths:
+  /webhook:
+    post:
+      summary: Вебхук Telegram
+      operationId: webhook
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: <ID_ФУНКЦИИ_BOT>
+        service_account_id: <ID_СЕРВИСНОГО_АККАУНТА>
+      responses:
+        '200':
+          description: OK
