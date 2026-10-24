@@ -288,6 +288,14 @@ def test_cards_valid():
         assert course.card_for(n) is card
 
 
+def test_course_has_all_30_unique_cards():
+    assert len(course.CARDS) == course.COURSE_LENGTH == 30
+    titles = [card.title for card in course.CARDS]
+    assert len(set(titles)) == len(titles)
+    assert course.card_for(30) is course.CARDS[-1]
+    assert course.card_for(31) is None
+
+
 def test_format_card_escapes_html():
     card = course.Card(title="A < B", body="x & y", tip="<i>")
     text = course.format_card(3, card)
