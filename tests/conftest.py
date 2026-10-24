@@ -36,3 +36,38 @@ async def ydb_tables():
 
     async with temp_tables() as pool_and_prefix:
         yield pool_and_prefix
+
+
+@pytest.fixture
+async def bot_env():
+    """(dp, bot, session, deps): диспетчер на MemoryStorage и FSM в памяти, без сети.
+
+    Часы — ``FixedClock`` на 2026-10-24 09:00 UTC (12:00 МСК), ``vision`` — пустой ``FakeVision``,
+    ``fetch_photo`` отдаёт ``b""``. Поля ``deps`` можно подменять в тесте: обработчики читают
+    их из ``deps`` при каждом вызове.
+    """
+    import random  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from aiogram import Bot  # noqa: PLC0415
+    from aiogram.fsm.storage.memory import MemoryStorage as FsmMemoryStorage  # noqa: PLC0415
+
+    from bot.app import Deps, build_dispatcher  # noqa: PLC0415
+    from tests.fakes import BOT_TOKEN, FakeVision, FixedClock, MockedSession  # noqa: PLC0415
+
+    async def fetch_photo(bot, file_id: str) -> bytes:
+        return b""
+
+    deps = Deps(
+        storage=MemoryStorage(),
+        vision=FakeVision([]),
+        fetch_photo=fetch_photo,
+        clock=FixedClock(datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)),
+        admin_chat_id=None,
+        rng=random.Random(0),
+    )
+    session = MockedSession()
+    bot = Bot(token=BOT_TOKEN, session=session)
+    dp = build_dispatcher(deps, FsmMemoryStorage())
+    yield dp, bot, session, deps
+    await bot.session.close()
