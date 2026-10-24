@@ -293,7 +293,7 @@ async def on_chart(callback: CallbackQuery, deps: Deps) -> None:
     try:
         png = render_weight_chart(weighings, target, forecast)
     except Exception:
-        log.warning("chart render failed", extra={"user_id": user.user_id, "error_kind": "chart"})
+        log.warning("chart render failed", exc_info=True, extra={"user_id": user.user_id, "error_kind": "chart"})
         text = f"{texts.CHART_UNAVAILABLE}\n\n{format_progress(user, weighings, today)}"
         await callback.message.answer(text)
         return

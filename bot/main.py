@@ -2,7 +2,8 @@
 
 Переменные окружения: BOT_TOKEN, KIE_API_KEY, WEBHOOK_SECRET, ADMIN_CHAT_ID (необязательна),
 YDB_ENDPOINT, YDB_DATABASE, VISION_PRIMARY, VISION_FALLBACK (необязательна); PRIVACY_URL читает
-``bot.texts``, YDB_METADATA_CREDENTIALS — ``bot.ydb_storage``.
+``bot.texts`` (обязательна: без неё ``_init_runtime`` падает с ошибкой в логе),
+YDB_METADATA_CREDENTIALS — ``bot.ydb_storage``.
 """
 from __future__ import annotations
 
@@ -78,6 +79,30 @@ async def process_webhook(
     return _OK
 
 
+# --- настройки ---
+
+
+def parse_admin_chat_id(raw: str | None) -> int | None:
+    """ADMIN_CHAT_ID: пусто — без оповещений; не число — ошибка в логе и тоже без оповещений."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        log.error("config: ADMIN_CHAT_ID is not a number, admin alerts are off", extra={"user_id": None, "error_kind": "config"})
+        return None
+
+
+def _check_config() -> None:
+    """Обязательные настройки, без которых бот работал бы неправильно, а не падал."""
+    from bot import texts  # noqa: PLC0415
+
+    if not texts.PRIVACY_URL:
+        log.error("config: PRIVACY_URL is not set", extra={"user_id": None, "error_kind": "config"})
+        raise RuntimeError("PRIVACY_URL is not set")
+
+
 # --- рантайм Cloud Functions: объекты создаются один раз на процесс ---
 
 _runtime: dict[str, Any] = {}
@@ -112,6 +137,8 @@ async def _close_runtime(rt: dict[str, Any]) -> None:
 
 
 async def _init_runtime() -> dict[str, Any]:
+    _check_config()
+
     import httpx  # noqa: PLC0415
 
     from bot import ydb_storage  # noqa: PLC0415
@@ -133,13 +160,12 @@ async def _init_runtime() -> dict[str, Any]:
         buf = await bot.download(file_id)
         return buf.getvalue()
 
-    admin = os.environ.get("ADMIN_CHAT_ID", "").strip()
     deps = Deps(
         storage=storage,
         vision=vision,
         fetch_photo=fetch_photo,
         clock=lambda: datetime.now(timezone.utc),
-        admin_chat_id=int(admin) if admin else None,
+        admin_chat_id=parse_admin_chat_id(os.environ.get("ADMIN_CHAT_ID")),
         rng=random.Random(),
     )
     dp = build_dispatcher(deps, ydb_storage.YdbFsmStorage(pool))

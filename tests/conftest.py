@@ -1,8 +1,11 @@
 import os
 
-import pytest
+# Ссылка на политику обязательна в рабочем окружении (bot.main._check_config); тестам — своя.
+os.environ.setdefault("PRIVACY_URL", "https://privacy.test/policy")
 
-from bot.storage import MemoryStorage
+import pytest  # noqa: E402
+
+from bot.storage import MemoryStorage  # noqa: E402
 
 
 def _require_ydb() -> None:

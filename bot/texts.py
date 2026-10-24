@@ -72,7 +72,8 @@ BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 
 # --- /start и согласие (спец. 6.1) ---
-PRIVACY_URL = os.environ.get("PRIVACY_URL") or "https://example.com/privacy"
+# Без ссылки функция bot не стартует (см. bot.main._check_config); в тестах её задаёт tests/conftest.py.
+PRIVACY_URL = (os.environ.get("PRIVACY_URL") or "").strip()
 DISCLAIMER = "Бот даёт ориентир, а не медицинские рекомендации."
 BTN_CONSENT = "Согласен"
 WELCOME = (
