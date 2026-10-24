@@ -289,8 +289,38 @@ async def on_bmi_ok(callback: CallbackQuery, state: FSMContext, deps: Deps) -> N
     await _complete(callback.message, state, deps, callback.from_user.id, target)
 
 
+# --- выход из повторной анкеты ---
+
+MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
+
+
+def _is_escape(message: Message) -> bool:
+    if message.text in MENU_TEXTS or message.photo:
+        return True
+    doc = message.document
+    return doc is not None and (doc.mime_type or "").startswith("image/")
+
+
+async def stay_in_onboarding(message: Message, state: FSMContext, raw_state: str | None, deps: Deps) -> bool:
+    """Фильтр роутера анкеты. Повторная анкета («Новая цель», «Пройти заново»): кнопка меню или
+    фото сбрасывают состояние, и сообщение уходит к следующим роутерам — как ``leave_weight_input``.
+
+    Фильтр стоит на уровне роутера, а не обработчика: ``raw_state`` в данных апдейта не меняется
+    после ``state.clear()``, и шаги анкеты ниже в том же роутере всё равно поймали бы сообщение.
+    Первую анкету (профиля ещё нет) так не покинуть.
+    """
+    if raw_state not in Onboarding or not _is_escape(message):
+        return True
+    user = await deps.storage.get_user(message.from_user.id)
+    if user is None or user.profile is None:
+        return True
+    await state.clear()
+    return False
+
+
 def build_router() -> Router:
     r = Router(name="onboarding")
+    r.message.filter(stay_in_onboarding)
     r.callback_query.register(on_sex, StateFilter(Onboarding.sex), F.data.startswith(keyboards.CB_SEX))
     r.callback_query.register(on_activity, StateFilter(Onboarding.activity), F.data.startswith(keyboards.CB_ACT))
     r.callback_query.register(on_goal, StateFilter(Onboarding.goal), F.data.startswith(keyboards.CB_GOAL))

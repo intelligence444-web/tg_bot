@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards, texts
-from bot.handlers.onboarding import start_onboarding
+from bot.handlers.onboarding import Onboarding, start_onboarding
 from bot.models import User
 
 if TYPE_CHECKING:
@@ -41,6 +41,8 @@ async def on_consent(callback: CallbackQuery, state: FSMContext, deps: Deps) -> 
     if user.consent_at is None:
         user.consent_at = deps.clock()
         await deps.storage.save_user(user)
+    if await state.get_state() in Onboarding:
+        return  # старая кнопка «Согласен» посреди анкеты — анкету не перезапускаем
     if user.profile is None:
         await start_onboarding(callback.message, state)
     else:

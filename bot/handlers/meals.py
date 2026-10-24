@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, get_args
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
@@ -367,6 +369,23 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
 
 
 _MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
+
+
+async def leave_meal_edit(message: Message, state: FSMContext) -> None:
+    """Кнопка меню или команда вместо поправки: выходим из правки и обрабатываем как обычно."""
+    await state.clear()
+    raise SkipHandler
+
+
+def build_escape_router() -> Router:
+    """Ставится до команд (/stop_tips и т. п.), чтобы команда тоже закрывала правку записи."""
+    r = Router(name="meal_edit_escape")
+    r.message.register(
+        leave_meal_edit,
+        StateFilter(MealEdit.correction, MealEdit.sauce),
+        F.text.startswith("/") | F.text.in_(_MENU_TEXTS),
+    )
+    return r
 
 
 def build_router() -> Router:
