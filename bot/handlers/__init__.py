@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from bot.handlers import fallback, onboarding, start
+from bot.handlers import diary, fallback, meals, onboarding, start
 
 
 def _feature_routers() -> list[Router]:
-    return []
+    return [meals.build_router(), diary.build_router()]
 
 
 def build_router() -> Router:
