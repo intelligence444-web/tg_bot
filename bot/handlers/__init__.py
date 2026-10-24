@@ -1,7 +1,7 @@
 """Роутеры бота.
 
 Порядок важен: ``start`` (команды и согласие) → ``consent_gate`` (всё остальное без согласия)
-→ ``onboarding`` (шаги анкеты по состояниям) → сценарии следующих задач → ``fallback``.
+→ ``commands`` (/stop_tips, /start_tips, «❓ Помощь» — в любом состоянии) → ``onboarding`` (шаги анкеты по состояниям) → сценарии следующих задач → ``fallback``.
 Новые роутеры добавляются в ``_feature_routers`` — ``fallback`` всегда последний.
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ def build_router() -> Router:
     root.include_routers(
         start.build_router(),
         start.build_consent_gate(),
+        start.build_commands_router(),
         onboarding.build_router(),
         *_feature_routers(),
         fallback.build_router(),

@@ -1,10 +1,10 @@
-"""/start, согласие (спец. 6.1) и «шлагбаум» до согласия."""
+"""/start, согласие (спец. 6.1), «шлагбаум» до согласия, /stop_tips, /start_tips и «❓ Помощь»."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -76,4 +76,36 @@ def build_consent_gate() -> Router:
     r = Router(name="consent_gate")
     r.message.register(ask_consent_message, no_consent)
     r.callback_query.register(ask_consent_callback, no_consent)
+    return r
+
+
+# --- после согласия, в любом состоянии (спец. 9.3, 6.9) ---
+
+
+async def _set_tips(message: Message, deps: Deps, enabled: bool, reply: str) -> None:
+    user = await deps.storage.get_user(message.from_user.id)
+    if user is not None and user.tips_enabled != enabled:
+        user.tips_enabled = enabled
+        await deps.storage.save_user(user)
+    await message.answer(reply)
+
+
+async def on_stop_tips(message: Message, deps: Deps) -> None:
+    await _set_tips(message, deps, False, texts.TIPS_STOPPED)
+
+
+async def on_start_tips(message: Message, deps: Deps) -> None:
+    await _set_tips(message, deps, True, texts.TIPS_STARTED)
+
+
+async def on_help(message: Message) -> None:
+    await message.answer(texts.HELP)
+
+
+def build_commands_router() -> Router:
+    """Ставится после шлагбаума и до анкеты: работает в любом состоянии и не сбрасывает его."""
+    r = Router(name="commands")
+    r.message.register(on_stop_tips, Command("stop_tips"))
+    r.message.register(on_start_tips, Command("start_tips"))
+    r.message.register(on_help, F.text == texts.BTN_HELP)
     return r
