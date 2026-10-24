@@ -189,6 +189,8 @@ async def weighing_reply(user: User, day: date, kg: float, deps: Deps) -> tuple[
     if goal == "maintain":
         if corridor_out(user, trend):
             corridor_target = format_num(goal_target(user), 1)
+        elif drift(weighings, day, goal_target(user), goal).weekly_up:
+            parts.append(texts.WEIGHT_UP)
     else:
         target = goal_target(user)
         new = new_milestones(_start(user), trend, target, goal, user.milestones_sent)
@@ -298,16 +300,19 @@ async def on_chart(callback: CallbackQuery, deps: Deps) -> None:
 
 
 async def on_goal_done(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
-    await callback.answer()
     user = await load_profile_user(deps, callback.from_user.id)
-    if user is None:
+    # Кнопки актуальны, только пока цель достигнута и не сменена: finish_onboarding
+    # и «Держать вес» сбрасывают milestones_sent.
+    if user is None or "goal" not in user.milestones_sent or user.profile.goal not in ("lose", "gain"):
+        await callback.answer(texts.STALE_BUTTON)
         return
+    await callback.answer()
     choice = callback.data.removeprefix(keyboards.CB_GOAL_DONE)
     trend = await trend_now(user, deps)
     if choice == "new":
         await start_goal_step(callback.message, state, user, weight_kg=trend)
         return
-    if choice != "maintain" or user.profile.goal == "maintain":
+    if choice != "maintain":
         return
     today = today_for(deps)
     old_kcal = user.norm.kcal

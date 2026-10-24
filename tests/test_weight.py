@@ -410,3 +410,45 @@ def test_format_progress_planned_pace_when_few_data():
     text = format_progress(_user(), ws, START)
     # плановый темп 0,4 кг/нед: 8 кг = 20 недель = 140 дней
     assert text.split("\n")[2] == "Темп 0,4 кг/нед — цель примерно 13 марта"
+
+
+# --- fix round 1 ---
+
+
+async def test_stale_goal_done_maintain_keeps_new_goal(bot_env):
+    from aiogram.methods import AnswerCallbackQuery
+
+    dp, bot, session, deps = await _env(bot_env)
+    await _weigh(dp, bot, session, "62")
+    await dp.feed_update(bot, make_callback("goal_done:new"))
+    await dp.feed_update(bot, make_callback("goal:lose"))
+    await dp.feed_update(bot, make_message("58"))
+    before = await deps.storage.get_user(1)
+    session.clear()
+    await dp.feed_update(bot, make_callback("goal_done:maintain"))
+    after = await deps.storage.get_user(1)
+    assert after == before
+    assert after.profile.goal == "lose" and after.profile.target_weight_kg == 58
+    assert [r.text for r in session.of_type(AnswerCallbackQuery)] == [texts.STALE_BUTTON]
+    assert not session.of_type(SendMessage)
+
+
+async def test_second_goal_done_maintain_is_stale(bot_env):
+    from aiogram.methods import AnswerCallbackQuery
+
+    dp, bot, session, deps = await _env(bot_env)
+    await _weigh(dp, bot, session, "62")
+    await dp.feed_update(bot, make_callback("goal_done:maintain"))
+    before = await deps.storage.get_user(1)
+    session.clear()
+    await dp.feed_update(bot, make_callback("goal_done:maintain"))
+    assert await deps.storage.get_user(1) == before
+    assert [r.text for r in session.of_type(AnswerCallbackQuery)] == [texts.STALE_BUTTON]
+
+
+async def test_maintain_weekly_up_inside_corridor(bot_env):
+    dp, bot, session, deps = await _env(bot_env, goal="maintain")
+    msg = await _weigh(dp, bot, session, "70,8")  # тренд неделю назад 70, сейчас 70,8
+    assert "Вес держится в коридоре" in msg.text
+    assert texts.WEIGHT_UP in msg.text
+    assert "norm:recalc" not in _callbacks(msg)
