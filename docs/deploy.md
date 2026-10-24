@@ -91,7 +91,7 @@ yc config set folder-name calorie-bot
 
 ```
 yc iam service-account create --name bot-sa
-FOLDER_ID=$(yc config get folder-id)
+FOLDER_ID=$(yc resource-manager folder get calorie-bot --format json | jq -r .id)
 SA_ID=$(yc iam service-account get bot-sa --format json | jq -r .id)
 for ROLE in ydb.editor functions.functionInvoker serverless.functions.invoker; do
   yc resource-manager folder add-access-binding "$FOLDER_ID" --role "$ROLE" --subject "serviceAccount:$SA_ID"
@@ -211,17 +211,17 @@ CREATE TABLE IF NOT EXISTS `alerts` (
 
 ## Шаг 5. Архив с кодом
 
-Функциям нужен ZIP-архив, в корне которого лежат папка `bot` и файл `requirements.txt` —
-и больше ничего (без папок `tests`, `.venv`, `docs`). Облако само установит библиотеки
+Функциям нужен ZIP-архив, в корне которого лежат файл `index.py`, папка `bot` и файл
+`requirements.txt` — и больше ничего (без папок `tests`, `.venv`, `docs`). Облако само установит библиотеки
 по `requirements.txt`.
 
 - **Проще всего:** попросите разработчика прислать готовый `bot.zip`.
 - **Mac:** откройте «Терминал», перейдите в папку проекта и выполните
   `bash scripts/build_zip.sh` — архив появится в `dist/bot.zip`.
-- **Windows:** откройте папку проекта в Проводнике, выделите **папку `bot`** и **файл
-  `requirements.txt`** (с зажатой Ctrl), нажмите правой кнопкой →
+- **Windows:** откройте папку проекта в Проводнике, выделите **файл `index.py`**, **папку `bot`**
+  и **файл `requirements.txt`** (с зажатой Ctrl), нажмите правой кнопкой →
   **«Отправить» → «Сжатая ZIP-папка»** (в Windows 11: **«Сжать в ZIP-файл»**).
-  Важно выделить именно эти два элемента, а не папку проекта целиком.
+  Важно выделить именно эти три элемента, а не папку проекта целиком.
 
 ---
 
@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS `alerts` (
    Если предложат шаблон с примером кода — снимите галочку «Добавить файлы с примерами кода»
    и нажмите **«Продолжить»**.
 4. **Способ:** выберите **«ZIP-архив»** и загрузите `bot.zip` из шага 5.
-5. **Точка входа:** `bot.main.handler`
+5. **Точка входа:** `index.handler`
 6. **Параметры:**
    - Таймаут: `120` секунд
    - Память: `512 МБ`
@@ -265,7 +265,7 @@ yc serverless function create --name bot
 yc serverless function version create \
   --function-name bot \
   --runtime python312 \
-  --entrypoint bot.main.handler \
+  --entrypoint index.handler \
   --memory 512m \
   --execution-timeout 120s \
   --service-account-id "$SA_ID" \
@@ -281,7 +281,7 @@ yc serverless function version create \
 
 1. **Cloud Functions → «Создать функцию»**, имя `daily` → **«Создать»**.
 2. Среда выполнения **Python 3.12**, способ **«ZIP-архив»**, тот же `bot.zip`.
-3. **Точка входа:** `bot.daily.handler`
+3. **Точка входа:** `index.daily`
 4. **Таймаут:** `600` секунд, **память:** `256 МБ`, **сервисный аккаунт:** `bot-sa`.
 5. **Переменные окружения:**
 
@@ -299,7 +299,7 @@ yc serverless function create --name daily
 yc serverless function version create \
   --function-name daily \
   --runtime python312 \
-  --entrypoint bot.daily.handler \
+  --entrypoint index.daily \
   --memory 256m \
   --execution-timeout 600s \
   --service-account-id "$SA_ID" \
@@ -365,7 +365,9 @@ yc serverless api-gateway create --name bot-gateway --spec docs/api-gateway.yaml
 
    Хвост `%5B%22message%22%2C%22callback_query%22%5D` — это закодированный список
    `["message","callback_query"]`, копируйте его как есть.
-2. Вставьте ссылку в адресную строку браузера и нажмите Enter.
+2. Откройте приватное окно браузера (режим инкогнито: Ctrl+Shift+N в Chrome на Windows,
+   Cmd+Shift+N на Mac), чтобы ссылка с `BOT_TOKEN` и `WEBHOOK_SECRET` не осталась в истории.
+   Вставьте ссылку в адресную строку и нажмите Enter.
 3. Должен открыться ответ `{"ok":true,"result":true,"description":"Webhook was set"}`.
 4. Проверить вебхук можно ссылкой `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`:
    в ответе должен быть ваш адрес `.../webhook`, а `last_error_message` — отсутствовать.
@@ -435,7 +437,7 @@ yc serverless function logs daily --since 24h
 
 ```
 yc serverless function version create --function-name bot --runtime python312 \
-  --entrypoint bot.main.handler --memory 512m --execution-timeout 120s \
+  --entrypoint index.handler --memory 512m --execution-timeout 120s \
   --service-account-id "$SA_ID" --source-path dist/bot.zip \
   --environment ...   # те же переменные, что в шаге 6
 ```

@@ -17,7 +17,8 @@ Telegram-бот: пользователь фотографирует еду, б�
 ## Структура
 
 ```
-bot/            код бота (архив функции: bot/ + requirements.txt)
+index.py        точки входа Cloud Functions: index.handler (bot), index.daily (daily)
+bot/            код бота (архив функции: index.py + bot/ + requirements.txt)
   main.py       точка входа функции bot (вебхук)
   daily.py      точка входа функции daily (таймер, рассылки)
   app.py        сборка диспетчера aiogram
@@ -35,6 +36,12 @@ docs/deploy.md  пошаговый запуск в Яндекс Облаке
 
 ```
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/python -m pytest
+```
+
+Windows:
+
+```
+python -m venv .venv && .venv\Scripts\pip install -r requirements-dev.txt && .venv\Scripts\python -m pytest
 ```
 
 Тесты против настоящей YDB помечены `ydb` и пропускаются, если не задан `YDB_ENDPOINT`.

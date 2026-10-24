@@ -42,7 +42,7 @@ def test_deploy_md_contains_api_gateway_spec():
 
 def test_deploy_md_key_values():
     for needle in (
-        "bot.main.handler", "bot.daily.handler", "python312", "0 6 ? * * *",
+        "index.handler", "index.daily", "python312", "0 6 ? * * *",
         "ydb.editor", "functions.functionInvoker", "serverless.functions.invoker",
         "YDB_METADATA_CREDENTIALS", "%5B%22message%22%2C%22callback_query%22%5D",
         "drop_pending_updates=true", "ZIP-архив",
@@ -122,3 +122,21 @@ def test_eval_not_food_counts_as_failure(tmp_path):
     r = asyncio.run(eval_vision.evaluate_model("m", analyze, [s], {"x": b""}))
     assert r.failures == 1 and r.mae is None
     assert "—" in eval_vision.format_table([r], 1)
+
+
+def test_index_shim_exposes_entry_points():
+    import inspect
+
+    import index
+    from bot import daily, main
+
+    assert index.handler is main.handler
+    assert index.daily is daily.handler
+    assert inspect.iscoroutinefunction(index.handler) and inspect.iscoroutinefunction(index.daily)
+    assert set(index.__all__) == {"handler", "daily"}
+
+
+def test_build_zip_includes_index_shim():
+    script = (ROOT / "scripts" / "build_zip.sh").read_text(encoding="utf-8")
+    assert "dist/bot.zip index.py bot requirements.txt" in script
+    assert "`index.py`" in DEPLOY and "bot.main.handler" not in DEPLOY and "bot.daily.handler" not in DEPLOY
