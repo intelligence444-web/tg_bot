@@ -6,6 +6,7 @@
 
 Норма пересчитывается по весу тренда. Пока ``today <= maintain_transition_until``,
 ккал = (``transition_from_kcal`` + TDEE) / 2 — плавный выход после достигнутой цели (9.2).
+Когда переход кончился, а взвешиваний не было, норму для показа даёт ``calc.effective_norm``.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot import keyboards, texts
-from bot.calc import calculate_norm, format_num, parse_number, planned_pace_kg_week, round_half_up
+from bot.calc import calculate_norm, effective_norm, format_num, parse_number, planned_pace_kg_week, round_half_up
 from bot.chart import render_weight_chart
 from bot.diary import to_local
 from bot.handlers.onboarding import WEIGHT_RANGE, start_goal_step, start_onboarding
@@ -102,7 +103,7 @@ def corridor_out(user: User, trend: float) -> bool:
 def _pace(user: User, weighings: list[Weighing], today: date) -> float:
     pace = actual_pace(weighings, today)
     if pace is None:
-        planned = planned_pace_kg_week(user.norm)
+        planned = planned_pace_kg_week(effective_norm(user, today))
         pace = -planned if user.profile.goal == "lose" else planned
     return pace
 

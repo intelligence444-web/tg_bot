@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from bot import keyboards, texts
+from bot.calc import effective_norm
 from bot.diary import format_day, summarize, to_local
 from bot.handlers.onboarding import start_onboarding
 from bot.progress import streak
@@ -29,7 +30,7 @@ async def on_today(message: Message, state: FSMContext, deps: Deps) -> None:
     today = to_local(deps.clock()).date()
     meals = await deps.storage.meals_on(user_id, today)
     days = await deps.storage.meal_days(user_id, today - STREAK_LOOKBACK)
-    text = format_day(summarize(meals), user.norm, streak(days, today))
+    text = format_day(summarize(meals), effective_norm(user, today), streak(days, today))
     await message.answer(text, reply_markup=keyboards.main_menu())
 
 

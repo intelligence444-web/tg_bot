@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from bot.models import Activity, Norm, Profile, Sex
+from bot.models import Activity, Norm, Profile, Sex, User
 
 ACTIVITY_FACTORS: dict[Activity, float] = {
     "sedentary": 1.2,
@@ -95,3 +96,15 @@ def parse_number(text: str, lo: float, hi: float) -> float | None:
     if not lo <= value <= hi:
         return None
     return value
+
+
+def effective_norm(user: User, today: date) -> Norm:
+    """Норма на ``today``; после конца плавного выхода (9.2) — TDEE, даже без нового взвешивания.
+
+    Пока ``today <= maintain_transition_until``, в ``user.norm`` хранится середина между прежней
+    нормой и TDEE; после — норма пересчитывается по профилю без поправки. Ничего не сохраняет.
+    """
+    until = user.maintain_transition_until
+    if until is not None and today > until and user.profile is not None:
+        return calculate_norm(user.profile)
+    return user.norm

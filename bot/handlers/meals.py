@@ -22,7 +22,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot import keyboards, texts
-from bot.calc import format_num
+from bot.calc import effective_norm, format_num
 from bot.diary import meal_type_for, to_local
 from bot.handlers.onboarding import start_onboarding
 from bot.models import Analysis, Meal, MealType, User
@@ -93,7 +93,7 @@ def _render(meal: Meal, remaining: float, tip: Tip | None) -> tuple[str, InlineK
 
 async def _remaining(deps: Deps, user: User, day: date) -> float:
     meals = await deps.storage.meals_on(user.user_id, day)
-    return user.norm.kcal - sum(m.analysis.kcal for m in meals)
+    return effective_norm(user, day).kcal - sum(m.analysis.kcal for m in meals)
 
 
 def _is_food(a: Analysis) -> bool:
@@ -203,11 +203,12 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
     meal_type = meal_type_for(local)
     before = await deps.storage.meals_on(user_id, today)
     day_before = sum(m.analysis.kcal for m in before)
+    norm_kcal = effective_norm(user, today).kcal
     tip = choose_tip(
         analysis,
         meal_type,
         day_before,
-        user.norm.kcal,
+        norm_kcal,
         user.last_overeat_date == today,
         user.last_tip_variants,
         deps.rng,
@@ -228,7 +229,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
             user.last_tip_variants[tip.rule] = tip.variant
         await deps.storage.save_user(user)
 
-    text, markup = _render(meal, user.norm.kcal - day_before - analysis.kcal, tip)
+    text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, tip)
     await _edit_or_send(status, text, markup)
 
 

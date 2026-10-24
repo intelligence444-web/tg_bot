@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards, texts
-from bot.calc import format_num
+from bot.calc import effective_norm, format_num
 from bot.handlers.onboarding import start_goal_step, start_onboarding
 from bot.handlers.weight import (
     ask_onboarding,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 
 def format_profile(user: User, weighings: list[Weighing], today: date) -> str:
-    p, n = user.profile, user.norm
+    p, n = user.profile, effective_norm(user, today)
     trend = current_trend(user, weighings, today)
     goal = texts.GOAL_LABELS[p.goal]
     if p.target_weight_kg is not None:
