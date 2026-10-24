@@ -368,3 +368,187 @@ async def test_today_diary_with_streak(bot_env):
     assert text.startswith("📅 Сегодня — 495 / ")
     assert "🔥 2 дня подряд" in text
     assert "🍽 Обед — 495 ккал" in text
+
+
+# --- финальная проверка: устойчивость фото и кнопок ---
+
+import asyncio  # noqa: E402
+import logging  # noqa: E402
+
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError  # noqa: E402
+from aiogram.methods import SendMessage as _SendMessage  # noqa: E402
+from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, Update  # noqa: E402
+from aiogram.types import User as TgUser  # noqa: E402
+
+from bot.handlers import meals as meals_mod  # noqa: E402
+from tests.fakes import fsm_context  # noqa: E402
+
+
+class _MutatingVision(FakeVision):
+    """Пока идёт распознавание, другой апдейт меняет пользователя в базе."""
+
+    def __init__(self, results, storage):
+        super().__init__(results)
+        self.storage = storage
+
+    async def analyze(self, image_jpeg, caption):
+        user = await self.storage.get_user(1)
+        user.course_day = 5
+        user.tips_enabled = False
+        await self.storage.save_user(user)
+        return await super().analyze(image_jpeg, caption)
+
+
+async def test_photo_rereads_user_after_vision(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    deps.vision = _MutatingVision([big(400)], deps.storage)  # big(400) даёт совет no_veg → save_user
+    await dp.feed_update(bot, make_message(photo=True))
+    user = await deps.storage.get_user(1)
+    assert "no_veg" in user.last_tip_variants
+    assert user.course_day == 5 and user.tips_enabled is False
+
+
+class _SlowVision(FakeVision):
+    async def analyze(self, image_jpeg, caption):
+        await asyncio.sleep(5)
+        return await super().analyze(image_jpeg, caption)
+
+    async def correct(self, previous, text):
+        await asyncio.sleep(5)
+        return await super().correct(previous, text)
+
+
+async def test_photo_vision_time_budget(bot_env, monkeypatch):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    monkeypatch.setattr(meals_mod, "VISION_BUDGET_S", 0.05)
+    deps.vision = _SlowVision([pasta()])
+    await dp.feed_update(bot, make_message(photo=True))
+    assert session.texts()[-1] == texts.OVERLOADED
+    assert await deps.storage.meals_on(1, TODAY) == []
+
+
+async def test_correction_vision_time_budget(bot_env, monkeypatch):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    await dp.feed_update(bot, make_callback(f"meal:edit:{meal.meal_id}"))
+    monkeypatch.setattr(meals_mod, "VISION_BUDGET_S", 0.05)
+    deps.vision = _SlowVision([buckwheat()])
+    session.clear()
+    await dp.feed_update(bot, make_message("это гречка"))
+    assert session.texts()[-1] == texts.OVERLOADED
+    assert (await deps.storage.get_meal(1, meal.meal_id)).analysis == pasta()
+
+
+def _inaccessible_callback(data: str, user_id: int = 1) -> Update:
+    cq = CallbackQuery(
+        id="cq-inacc",
+        from_user=TgUser(id=user_id, is_bot=False, first_name="Тест"),
+        chat_instance="ci",
+        data=data,
+        message=InaccessibleMessage(chat=Chat(id=user_id, type="private"), message_id=5, date=0),
+    )
+    return Update(update_id=987654, callback_query=cq)
+
+
+async def test_callback_on_inaccessible_message_sends_new(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, _inaccessible_callback(f"mt:{meal.meal_id}:dinner"))
+    assert session.of_type(EditMessageText) == []
+    sends = session.of_type(SendMessage)
+    assert len(sends) == 1 and "Записал в дневник: ужин" in sends[0].text
+
+
+async def test_edit_not_modified_is_ignored(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    err = TelegramBadRequest(
+        method=EditMessageText(text="x"),
+        message="Bad Request: message is not modified: specified new message content is the same",
+    )
+    session.fail(EditMessageText, err, times=1)
+    await dp.feed_update(bot, make_callback(f"mt:{meal.meal_id}:lunch"))
+    assert session.of_type(SendMessage) == []
+
+
+async def test_photo_download_failure_is_overloaded(bot_env, caplog):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+
+    async def fetch_photo(_bot, file_id):
+        raise TelegramNetworkError(method=_SendMessage(chat_id=1, text="x"), message="timeout")
+
+    deps.fetch_photo = fetch_photo
+    with caplog.at_level(logging.WARNING):
+        await dp.feed_update(bot, make_message(photo=True))
+    assert session.texts()[-1] == texts.OVERLOADED
+    assert deps.vision.calls == []
+    assert any(getattr(r, "error_kind", None) == "download" and r.levelno >= logging.ERROR for r in caplog.records)
+
+
+class _NoCreditsBreaksAdmin(FakeVision):
+    def __init__(self, session):
+        super().__init__([VisionUnavailable("x", no_credits=True)])
+        self.session = session
+
+    async def analyze(self, image_jpeg, caption):
+        # статус «Анализирую…» уже отправлен; следующая SendMessage — оповещение админа
+        err = TelegramBadRequest(method=_SendMessage(chat_id=777, text="x"), message="Bad Request: chat not found")
+        self.session.fail(SendMessage, err, times=1)
+        return await super().analyze(image_jpeg, caption)
+
+
+async def test_admin_alert_failure_is_logged(bot_env, caplog):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    deps.admin_chat_id = 777
+    deps.vision = _NoCreditsBreaksAdmin(session)
+    with caplog.at_level(logging.WARNING):
+        await dp.feed_update(bot, make_message(photo=True))
+    assert session.texts()[-2] == texts.OVERLOADED
+    assert any(getattr(r, "error_kind", None) == "admin_alert" for r in caplog.records)
+
+
+async def test_album_dedupe_before_profile_check(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()], onboarded=False)
+    await deps.storage.save_user(User(user_id=1, consent_at=deps.clock()))
+    await dp.feed_update(bot, make_message(photo=True, media_group_id="g7"))
+    # второе фото альбома пришло параллельно — состояние анкеты ещё не видно
+    await fsm_context(dp).clear()
+    session.clear()
+    await dp.feed_update(bot, make_message(photo=True, media_group_id="g7"))
+    assert texts.NEED_ONBOARDING not in session.texts()
+    assert session.texts() == [texts.ALBUM_HINT]
+
+
+def test_format_meal_caps_items():
+    many = Analysis(
+        True, "high", tuple(item("Очень длинное название блюда " * 10 + str(n), 10, 10) for n in range(40)), False
+    )
+    text = format_meal(many, "lunch", 100, Tip("sweet", 0, "Совет дня"))
+    assert text.count("🍽") == 15
+    assert "…и ещё 25 позиций" in text
+    assert "Итого: 400 ккал" in text
+    assert len(text) < 4000
+
+
+async def test_malformed_callbacks_are_silent(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    for data in ("fat:", "fat:abc", "mt:", "mt:abc"):
+        session.clear()
+        await dp.feed_update(bot, make_callback(data))
+        assert len(session.of_type(AnswerCallbackQuery)) == 1
+        assert session.of_type(SendMessage) == []
+
+
+async def test_type_menu_on_inaccessible_message_sends_new(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, _inaccessible_callback(f"meal:type:{meal.meal_id}"))
+    sends = session.of_type(SendMessage)
+    assert len(sends) == 1 and f"mt:{meal.meal_id}:dinner" in _callbacks(sends[0].reply_markup)

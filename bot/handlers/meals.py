@@ -7,16 +7,17 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, get_args
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot import keyboards, texts
 from bot.calc import format_num
@@ -24,7 +25,7 @@ from bot.diary import meal_type_for, to_local
 from bot.handlers.onboarding import start_onboarding
 from bot.models import Analysis, Meal, MealType, User
 from bot.tips import Tip, choose_tip
-from bot.vision import VisionError, VisionUnavailable, prepare_image
+from bot.vision import BadImage, VisionError, VisionUnavailable, prepare_image
 
 if TYPE_CHECKING:
     from bot.app import Deps
@@ -35,6 +36,9 @@ FAT_GRAMS = {"none": 0.0, "little": 10.0, "much": 20.0}
 MEAL_TYPES: tuple[MealType, ...] = get_args(MealType)
 ALERT_INTERVAL = timedelta(hours=1)
 SAUCE_PREFIX = "Соус: "
+VISION_BUDGET_S = 95.0  # общий срок на распознавание вместе с запасной моделью и повторами
+MAX_SHOWN_ITEMS = 15
+MAX_NAME_LEN = 80
 
 
 class MealEdit(StatesGroup):
@@ -47,11 +51,15 @@ class MealEdit(StatesGroup):
 
 def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, tip: Tip | None) -> str:
     lines = []
-    for i in analysis.items:
-        line = texts.MEAL_ITEM.format(name=i.name, grams=format_num(i.grams), kcal=format_num(i.kcal))
+    for i in analysis.items[:MAX_SHOWN_ITEMS]:
+        name = i.name if len(i.name) <= MAX_NAME_LEN else i.name[: MAX_NAME_LEN - 1] + "…"
+        line = texts.MEAL_ITEM.format(name=name, grams=format_num(i.grams), kcal=format_num(i.kcal))
         if i.hidden:
             line += texts.MEAL_ITEM_HIDDEN
         lines.append(line)
+    hidden_count = len(analysis.items) - MAX_SHOWN_ITEMS
+    if hidden_count > 0:
+        lines.append(texts.MEAL_MORE_ITEMS.format(n=hidden_count, word=texts.plural(hidden_count, *texts.ITEM_WORDS)))
     lines.append(
         texts.MEAL_TOTAL.format(
             kcal=format_num(analysis.kcal),
@@ -90,11 +98,28 @@ def _is_food(a: Analysis) -> bool:
     return a.is_food and bool(a.items)
 
 
-async def _edit_or_send(target: Message, text: str, markup: InlineKeyboardMarkup | None) -> None:
+async def _edit_or_send(
+    target: Message | InaccessibleMessage, text: str, markup: InlineKeyboardMarkup | None
+) -> None:
+    """Правит сообщение бота; старое (недоступное) или нередактируемое — шлёт новым."""
+    if not isinstance(target, Message):
+        await target.answer(text, reply_markup=markup)
+        return
     try:
         await target.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
         await target.answer(text, reply_markup=markup)
+
+
+async def _vision_call(call) -> Analysis:
+    """Распознавание в пределах ``VISION_BUDGET_S``; не уложились — как «сервис недоступен»."""
+    try:
+        async with asyncio.timeout(VISION_BUDGET_S):
+            return await call
+    except TimeoutError as e:
+        raise VisionUnavailable("vision time budget exceeded", no_credits=False) from e
 
 
 async def _need_profile(message: Message, state: FSMContext, user: User | None) -> bool:
@@ -109,7 +134,10 @@ async def _alert_no_credits(bot: Bot, deps: Deps) -> None:
     if deps.admin_chat_id is None:
         return
     if await deps.storage.alert_allowed("kie_no_credits", deps.clock(), ALERT_INTERVAL):
-        await bot.send_message(deps.admin_chat_id, texts.ADMIN_KIE_NO_CREDITS)
+        try:
+            await bot.send_message(deps.admin_chat_id, texts.ADMIN_KIE_NO_CREDITS)
+        except TelegramAPIError:
+            log.error("admin alert failed", exc_info=True, extra={"user_id": None, "error_kind": "admin_alert"})
 
 
 # --- фото ---
@@ -117,30 +145,36 @@ async def _alert_no_credits(bot: Bot, deps: Deps) -> None:
 
 async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) -> None:
     user_id = message.from_user.id
-    user = await deps.storage.get_user(user_id)
-    if await _need_profile(message, state, user):
-        return
-    if await state.get_state() in (MealEdit.correction.state, MealEdit.sauce.state):
-        await state.clear()
-
     now = deps.clock()
+    # Альбом отсекаем первым: остальные фото альбома не должны снова звать в анкету.
     group = message.media_group_id
     if group is not None and not await deps.storage.mark_processed(f"album:{group}", now):
         if await deps.storage.mark_processed(f"album-hint:{group}", now):
             await message.answer(texts.ALBUM_HINT)
         return
 
+    user = await deps.storage.get_user(user_id)
+    if await _need_profile(message, state, user):
+        return
+    if await state.get_state() in (MealEdit.correction.state, MealEdit.sauce.state):
+        await state.clear()
+
     status = await message.answer(texts.ANALYZING)
     file_id = message.photo[-1].file_id if message.photo else message.document.file_id
     try:
         raw = await deps.fetch_photo(bot, file_id)
+    except Exception:  # сеть или Telegram: файл не скачался
+        log.error("photo download failed", exc_info=True, extra={"user_id": user_id, "error_kind": "download"})
+        await _edit_or_send(status, texts.OVERLOADED, None)
+        return
+    try:
         jpeg = prepare_image(raw)
-    except Exception:  # PIL: не картинка или битый файл
+    except BadImage:
         log.warning("photo not an image", extra={"user_id": user_id, "error_kind": "bad_image"})
         await _edit_or_send(status, texts.NOT_FOOD, None)
         return
     try:
-        analysis = await deps.vision.analyze(jpeg, message.caption)
+        analysis = await _vision_call(deps.vision.analyze(jpeg, message.caption))
     except VisionError as e:
         no_credits = isinstance(e, VisionUnavailable) and e.no_credits
         log.warning(
@@ -153,6 +187,12 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         return
     if not _is_food(analysis):
         await _edit_or_send(status, texts.NOT_FOOD, None)
+        return
+    # Распознавание идёт до полутора минут: за это время пользователь мог измениться
+    # (/stop_tips, рассылка курса), поэтому пишем поверх свежей записи, а не старой.
+    user = await deps.storage.get_user(user_id)
+    if user is None or user.norm is None:
+        await _edit_or_send(status, texts.NEED_ONBOARDING, None)
         return
 
     now = deps.clock()
@@ -202,8 +242,20 @@ async def _load(callback: CallbackQuery, deps: Deps, meal_id: str) -> tuple[User
     return user, meal
 
 
+def _parts(data: str) -> tuple[str, str] | None:
+    """``prefix:meal_id:value`` → (meal_id, value); иначе None."""
+    parts = data.split(":")
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
 async def on_fat(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
-    _, meal_id, choice = callback.data.split(":", 2)
+    parsed = _parts(callback.data)
+    if parsed is None:
+        await callback.answer()
+        return
+    meal_id, choice = parsed
     loaded = await _load(callback, deps, meal_id)
     if loaded is None:
         return
@@ -250,14 +302,23 @@ async def on_type_menu(callback: CallbackQuery, deps: Deps) -> None:
     if await _load(callback, deps, meal_id) is None:
         return
     await callback.answer(texts.ASK_MEAL_TYPE)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=keyboards.meal_types(meal_id))
-    except TelegramBadRequest:
-        await callback.message.answer(texts.ASK_MEAL_TYPE, reply_markup=keyboards.meal_types(meal_id))
+    markup = keyboards.meal_types(meal_id)
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=markup)
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                return
+    await callback.message.answer(texts.ASK_MEAL_TYPE, reply_markup=markup)
 
 
 async def on_type_chosen(callback: CallbackQuery, deps: Deps) -> None:
-    _, meal_id, meal_type = callback.data.split(":", 2)
+    parsed = _parts(callback.data)
+    if parsed is None:
+        await callback.answer()
+        return
+    meal_id, meal_type = parsed
     loaded = await _load(callback, deps, meal_id)
     if loaded is None:
         return
@@ -289,7 +350,7 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
     if current == MealEdit.sauce.state:
         text = SAUCE_PREFIX + text
     try:
-        analysis = await deps.vision.correct(meal.analysis, text)
+        analysis = await _vision_call(deps.vision.correct(meal.analysis, text))
     except VisionError:
         log.warning("vision unavailable", extra={"user_id": user_id, "error_kind": "vision_unavailable"})
         await message.answer(texts.OVERLOADED)
