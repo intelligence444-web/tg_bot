@@ -292,3 +292,50 @@ def test_format_card_escapes_html():
     card = course.Card(title="A < B", body="x & y", tip="<i>")
     text = course.format_card(3, card)
     assert text == "📚 Знание дня · 3/30\n\n<b>A &lt; B</b>\n\nx &amp; y\n\n💡 &lt;i&gt;"
+
+
+# --- свежие данные и ошибки по одному пользователю ---
+
+
+class _FlipTipsStorage(MemoryStorage):
+    """После выдачи списка рассылки пользователь успевает нажать /stop_tips."""
+
+    async def daily_users(self):
+        users = await super().daily_users()
+        u = await self.get_user(1)
+        u.tips_enabled = False
+        await self.save_user(u)
+        return users
+
+
+async def test_stop_tips_after_list_is_respected():
+    storage = _FlipTipsStorage()
+    session = MockedSession()
+    bot = Bot(token=BOT_TOKEN, session=session)
+    await storage.save_user(_user(1, onboarded=MON - timedelta(days=20)))
+    counts = await run_daily(storage, bot, at_9_msk(MON))
+    assert counts == {"cards": 0, "reminders": 0, "deactivated": 0}
+    assert _sent(session) == []
+    user = await storage.get_user(1)
+    assert user.tips_enabled is False and user.course_day == 0
+
+
+class _BrokenForOneStorage(MemoryStorage):
+    async def get_user(self, user_id):
+        if user_id == 1:
+            raise RuntimeError("ydb down")
+        return await super().get_user(user_id)
+
+
+async def test_storage_error_for_one_user_does_not_abort_run(caplog):
+    storage = _BrokenForOneStorage()
+    session = MockedSession()
+    bot = Bot(token=BOT_TOKEN, session=session)
+    await storage.save_user(_user(1, onboarded=SAT))
+    await storage.save_user(_user(2, onboarded=SAT))
+    await storage.upsert_weight(2, SAT, 70.0)
+    counts = await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=1)))
+    assert counts == {"cards": 1, "reminders": 0, "deactivated": 0}
+    assert {m.chat_id for m in _sent(session)} == {2}
+    [rec] = [r for r in caplog.records if r.name == "bot.daily" and r.exc_info]
+    assert rec.user_id == 1 and rec.error_kind == "daily"

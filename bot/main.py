@@ -81,6 +81,34 @@ async def process_webhook(
 # --- рантайм Cloud Functions: объекты создаются один раз на процесс ---
 
 _runtime: dict[str, Any] = {}
+_init_lock: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+
+
+def _lock() -> asyncio.Lock:
+    """Замок инициализации для текущего цикла событий (asyncio.Lock привязан к циклу)."""
+    global _init_lock
+    loop = asyncio.get_running_loop()
+    if _init_lock is None or _init_lock[0] is not loop:
+        _init_lock = (loop, asyncio.Lock())
+    return _init_lock[1]
+
+
+async def _close_runtime(rt: dict[str, Any]) -> None:
+    """Закрыть старые клиенты, насколько получится: они могли остаться от другого цикла."""
+    from bot import ydb_storage  # noqa: PLC0415
+
+    closers = (
+        ("bot", lambda: rt["bot"].session.close()),
+        ("http", lambda: rt["http"].aclose()),
+        ("pool", lambda: ydb_storage.close(rt["pool"])),
+    )
+    for name, close in closers:
+        if name not in rt:
+            continue
+        try:
+            await close()
+        except Exception:
+            log.warning("runtime: failed to close %s", name, exc_info=True, extra={"user_id": None, "error_kind": "close"})
 
 
 async def _init_runtime() -> dict[str, Any]:
@@ -129,9 +157,16 @@ async def _init_runtime() -> dict[str, Any]:
 async def handler(event: dict, context: Any) -> dict:
     """Точка входа Cloud Function ``bot``."""
     # Клиенты привязаны к циклу событий: если рантайм сменил цикл, собираем заново.
-    if _runtime.get("loop") is not asyncio.get_running_loop():
-        _runtime.clear()
-        _runtime.update(await _init_runtime())
+    loop = asyncio.get_running_loop()
+    if _runtime.get("loop") is not loop:
+        async with _lock():
+            if _runtime.get("loop") is not loop:
+                if _runtime:
+                    log.warning("runtime: event loop changed, rebuilding clients", extra={"user_id": None, "error_kind": "loop_changed"})
+                    old = dict(_runtime)
+                    _runtime.clear()
+                    await _close_runtime(old)
+                _runtime.update(await _init_runtime())
     rt = _runtime
     return await process_webhook(
         event, rt["dp"], rt["bot"], rt["storage"], rt["secret"], datetime.now(timezone.utc)
