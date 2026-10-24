@@ -8,6 +8,7 @@ from bot.models import Goal, Weighing
 
 _EPS = 1e-9
 _DRIFT_KG = 0.3
+_MAX_FORECAST_DAYS = 1096  # дальше трёх лет прогноз не показываем
 
 MILESTONE_ORDER = ("first_kg", "five_percent", "q25", "q50", "q75", "goal")
 
@@ -69,14 +70,16 @@ def actual_pace(weighings: list[Weighing], today: date) -> float | None:
 
 
 def forecast_date(trend: float, target: float, pace: float, today: date) -> date | None:
-    """Дата достижения цели; None, если темп 0 или направлен не к цели."""
+    """Дата достижения цели; None, если темп 0, направлен не к цели или цель дальше трёх лет."""
     if pace == 0:
         return None
     needed = target - trend
     if needed * pace < 0:
         return None
-    weeks = abs(needed) / abs(pace)
-    return today + timedelta(days=round(weeks * 7))
+    days = abs(needed) / abs(pace) * 7
+    if days > _MAX_FORECAST_DAYS:
+        return None
+    return today + timedelta(days=round(days))
 
 
 def new_milestones(

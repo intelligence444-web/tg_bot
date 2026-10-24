@@ -121,7 +121,7 @@ async def finish_onboarding(user: User, profile: Profile, deps: Deps, *, record_
     """Сохраняет профиль и норму, начинает цель заново; возвращает текст итога (спец. 6.3).
 
     ``start_weight_kg`` = вес профиля, ``goal_started_at`` = сегодня (МСК), ``onboarded_at`` —
-    только если пусто, ``milestones_sent`` и ``maintain_transition_until`` сбрасываются,
+    только если пусто, ``milestones_sent``, ``maintain_transition_until`` и ``transition_from_kcal`` сбрасываются,
     ``course_day`` не меняется. При ``record_weighing`` вес записывается взвешиванием за сегодня.
     """
     today = to_local(deps.clock()).date()
@@ -134,6 +134,7 @@ async def finish_onboarding(user: User, profile: Profile, deps: Deps, *, record_
         user.onboarded_at = today
     user.milestones_sent = set()
     user.maintain_transition_until = None
+    user.transition_from_kcal = None
     if record_weighing:
         await deps.storage.upsert_weight(user.user_id, today, profile.weight_kg)
     await deps.storage.save_user(user)

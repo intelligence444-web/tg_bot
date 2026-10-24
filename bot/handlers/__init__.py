@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from bot.handlers import diary, fallback, meals, onboarding, start
+from bot.handlers import diary, fallback, meals, onboarding, profile, start, weight
 
 
 def _feature_routers() -> list[Router]:
-    return [meals.build_router(), diary.build_router()]
+    # weight — первым: сообщение в состоянии ввода веса, кроме числа, сбрасывает это состояние
+    # (SkipHandler) и уходит дальше, в том числе к фото и кнопкам меню.
+    return [weight.build_router(), meals.build_router(), diary.build_router(), profile.build_router()]
 
 
 def build_router() -> Router:

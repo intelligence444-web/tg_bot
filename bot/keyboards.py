@@ -91,3 +91,46 @@ def meal_types(meal_id: str) -> InlineKeyboardMarkup:
             [(labels["snack"], f"{CB_MT}{meal_id}:snack"), (labels["dinner"], f"{CB_MT}{meal_id}:dinner")],
         ]
     )
+
+
+# --- Вес, прогресс, профиль (спец. 6.6–6.9, 9) ---
+CB_CHART = "chart"
+CB_GOAL_DONE = "goal_done:"  # goal_done:{maintain|new}
+CB_CORRIDOR = "corridor:"  # corridor:{back|keep}
+CB_NORM_RECALC = "norm:recalc"
+CB_PROFILE_GOAL = "profile:goal"
+CB_PROFILE_RESTART = "profile:restart"
+
+
+def weighing_result(
+    *, goal_done: bool = False, corridor_target: str | None = None, recalc: bool = False
+) -> InlineKeyboardMarkup:
+    """Кнопки под ответом на взвешивание; ``corridor_target`` — желаемый вес текстом для кнопки."""
+    rows: list[list[tuple[str, str]]] = []
+    if goal_done:
+        rows.append([(texts.BTN_GOAL_MAINTAIN, f"{CB_GOAL_DONE}maintain"), (texts.BTN_GOAL_NEW, f"{CB_GOAL_DONE}new")])
+    if corridor_target is not None:
+        rows.append(
+            [
+                (texts.BTN_CORRIDOR_BACK.format(target=corridor_target), f"{CB_CORRIDOR}back"),
+                (texts.BTN_CORRIDOR_KEEP, f"{CB_CORRIDOR}keep"),
+            ]
+        )
+    if recalc:
+        rows.append([(texts.BTN_NORM_RECALC, CB_NORM_RECALC)])
+    rows.append([(texts.BTN_CHART, CB_CHART)])
+    return _inline(rows)
+
+
+def profile(corridor_target: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[tuple[str, str]]] = []
+    if corridor_target is not None:
+        rows.append(
+            [
+                (texts.BTN_CORRIDOR_BACK.format(target=corridor_target), f"{CB_CORRIDOR}back"),
+                (texts.BTN_CORRIDOR_KEEP, f"{CB_CORRIDOR}keep"),
+            ]
+        )
+    rows.append([(texts.BTN_CHART, CB_CHART), (texts.BTN_PROFILE_GOAL, CB_PROFILE_GOAL)])
+    rows.append([(texts.BTN_PROFILE_RESTART, CB_PROFILE_RESTART)])
+    return _inline(rows)

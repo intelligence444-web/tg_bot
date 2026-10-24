@@ -124,6 +124,7 @@ class User:
     goal_started_at: date | None = None
     onboarded_at: date | None = None
     maintain_transition_until: date | None = None
+    transition_from_kcal: float | None = None  # норма ккал на момент выбора «Держать вес»
     milestones_sent: set[str] = field(default_factory=set)
     course_day: int = 0
     tips_enabled: bool = True

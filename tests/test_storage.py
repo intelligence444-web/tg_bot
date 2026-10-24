@@ -27,6 +27,7 @@ def full_user(user_id: int = 1) -> User:
         goal_started_at=date(2026, 10, 1),
         onboarded_at=date(2026, 10, 1),
         maintain_transition_until=date(2026, 11, 1),
+        transition_from_kcal=1650.0,
         milestones_sent={"a", "b"},
         course_day=3,
         tips_enabled=False,

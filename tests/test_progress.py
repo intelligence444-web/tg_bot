@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -139,3 +139,11 @@ def test_drift_gain_and_maintain():
     assert drift(ws, D(8), 68, "gain").weekly_up is True
     ws = [W(1, 65.0), W(8, 64.5)]
     assert drift(ws, D(8), 65, "maintain").weekly_up is True
+
+
+def test_forecast_too_far_is_none():
+    assert forecast_date(66, 62, -1e-9, D(1)) is None
+    # 4 кг при 0,02 кг/нед = 200 недель > 3 лет
+    assert forecast_date(66, 62, -0.02, D(1)) is None
+    # 4 кг при 0,04 кг/нед = 100 недель = 700 дней — показываем
+    assert forecast_date(66, 62, -0.04, D(1)) == D(1) + timedelta(days=700)

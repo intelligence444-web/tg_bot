@@ -118,3 +118,12 @@ def test_create_tables_queries_shape():
 def test_bad_prefix_rejected():
     with pytest.raises(ValueError):
         create_tables_queries("x`; DROP TABLE users; --")
+
+
+def test_user_transition_from_kcal_roundtrip():
+    user = full_user()
+    row = user_to_row(user)
+    assert row["transition_from_kcal"] == 1650.0
+    assert "transition_from_kcal" in USERS_COLUMNS
+    assert user_from_row(_as_db(row)).transition_from_kcal == 1650.0
+    assert user_from_row(_as_db(user_to_row(User(user_id=3)))).transition_from_kcal is None
