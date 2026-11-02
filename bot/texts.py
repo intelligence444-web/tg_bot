@@ -290,3 +290,11 @@ HELP = (
     "/start_tips — включить их снова\n\n"
     f"{DISCLAIMER}"
 )
+
+# --- Рацион на день (v1.1 7.3) ---
+PLAN_TITLE = "Рацион на день — ориентир под твою норму"
+PLAN_MEAL_NAMES = {"breakfast": "Завтрак", "lunch": "Обед", "snack": "Перекус", "dinner": "Ужин"}
+PLAN_MEAL_HEAD = "{name} (~{kcal} ккал, ~{protein} г белка)"
+PLAN_OPTION = "{n}. {text} — {kcal} ккал, Б {protein} / Ж {fat} / У {carbs} г"
+PLAN_TOTAL = "Итого за день (по первым вариантам): ~{kcal} ккал, Б {protein} / Ж {fat} / У {carbs} г"
+PLAN_APPROX = "Суммы примерные: ±{pct}% от нормы"

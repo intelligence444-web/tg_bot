@@ -59,8 +59,8 @@ class VisionClient(Protocol):
     ) -> str: ...
 
 
-ANALYSIS_SCHEMA = """Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. Схема:
-{
+# Объект распознавания с пояснениями к полям; переиспользуется в bot/assistant.py.
+ANALYSIS_JSON = """{
   "is_food": true,
   "confidence": "high | medium | low",
   "items": [
@@ -73,6 +73,11 @@ ANALYSIS_SCHEMA = """Отвечай строго одним JSON-объекто�
 Поля "fat_type" и "comment" необязательные, остальные поля обязательны.
 Допустимые категории: main, side, vegetable, fruit, sweet, drink, sauce, fat, other.
 """
+
+ANALYSIS_SCHEMA = (
+    "Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. "
+    "Схема:\n" + ANALYSIS_JSON
+)
 
 SYSTEM_PROMPT = f"""Ты — нутрициолог, который оценивает калорийность еды по фото тарелки.
 
