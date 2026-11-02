@@ -59,9 +59,12 @@ CB_MEAL_TYPE = "meal:type:"  # meal:type:{meal_id}
 CB_MT = "mt:"  # mt:{meal_id}:{breakfast|lunch|snack|dinner}
 # Активность (v1.1 9). Не «act:del:» — префикс «act:» занят кнопками уровня активности анкеты.
 CB_ACT_DEL = "actdel:"  # actdel:{activity_id}
+# Предложение темы (v1.1 8): n — номер темы у пользователя, название — ``texts.TOPICS[n % 30]``.
+CB_TOPIC = "topic:"  # topic:{n}
 
 
-def meal_result(meal_id: str, ask_fat: bool) -> InlineKeyboardMarkup:
+def meal_result(meal_id: str, ask_fat: bool, topic: int | None = None) -> InlineKeyboardMarkup:
+    """Кнопки под едой; ``topic`` — номер предложенной темы (кнопка «💡 <тема>» последней строкой)."""
     rows: list[list[tuple[str, str]]] = []
     if ask_fat:
         rows.append(
@@ -83,7 +86,36 @@ def meal_result(meal_id: str, ask_fat: bool) -> InlineKeyboardMarkup:
         ]
     )
     rows.append([(texts.BTN_MEAL_TYPE, f"{CB_MEAL_TYPE}{meal_id}")])
+    if topic is not None:
+        rows.append([(texts.BTN_TOPIC.format(topic=texts.TOPICS[topic % len(texts.TOPICS)]), f"{CB_TOPIC}{topic}")])
     return _inline(rows)
+
+
+def parse_topic(data: str | None) -> int | None:
+    """``topic:{n}`` → n (n ≥ 0); иначе None."""
+    if data is None or not data.startswith(CB_TOPIC):
+        return None
+    raw = data.removeprefix(CB_TOPIC)
+    return int(raw) if raw.isascii() and raw.isdigit() else None
+
+
+def topic_of(markup: InlineKeyboardMarkup | None) -> int | None:
+    """Номер темы с кнопки «💡» в клавиатуре сообщения; кнопки нет — None."""
+    if markup is None:
+        return None
+    for row in markup.inline_keyboard:
+        for b in row:
+            n = parse_topic(b.callback_data)
+            if n is not None:
+                return n
+    return None
+
+
+def without_topic(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    rows = [
+        [b for b in row if parse_topic(b.callback_data) is None] for row in markup.inline_keyboard
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
 
 
 def activity_result(activity_id: str) -> InlineKeyboardMarkup:

@@ -1,7 +1,8 @@
 """Фото еды, уточнение масла и правки записей (спец. 6.4, 8.5, 10, 12, 13).
 
 Колбэки (``bot.keyboards``): ``fat:{meal_id}:{none|little|much|sauce}``, ``meal:edit:{meal_id}``,
-``meal:del:{meal_id}``, ``meal:type:{meal_id}``, ``mt:{meal_id}:{breakfast|lunch|snack|dinner}``.
+``meal:del:{meal_id}``, ``meal:type:{meal_id}``, ``mt:{meal_id}:{breakfast|lunch|snack|dinner}``;
+кнопку темы ``topic:{n}`` (v1.1 8) ставит ``record_meal``, нажатие обрабатывает ``bot.handlers.text``.
 Правка текстом — состояния ``MealEdit.correction`` / ``MealEdit.sauce``, в данных ``meal_id``.
 Фото нигде не сохраняется; в лог не пишутся ни байты, ни ответ модели.
 """
@@ -10,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, TypeVar, get_args
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ T = TypeVar("T")
 FAT_GRAMS = {"none": 0.0, "little": 10.0, "much": 20.0}
 MEAL_TYPES: tuple[MealType, ...] = get_args(MealType)
 ALERT_INTERVAL = timedelta(hours=1)
+TOPIC_HOUR = 18  # тему предлагаем под первой едой с этого часа (МСК)
 SAUCE_PREFIX = "Соус: "
 VISION_BUDGET_S = 95.0  # общий срок на распознавание вместе с запасной моделью и повторами
 MAX_SHOWN_ITEMS = 15
@@ -92,13 +94,42 @@ def format_meal(
 
 
 def _render(
-    meal: Meal, remaining: float | None, note: str | None = None, *, hint: str | None = None
+    meal: Meal,
+    remaining: float | None,
+    note: str | None = None,
+    *,
+    hint: str | None = None,
+    topic: int | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     text = format_meal(meal.analysis, meal.meal_type, remaining, note, hint=hint)
     ask = meal.analysis.ask_about_fat
     if ask:
         text += f"\n\n{texts.ASK_FAT}"
-    return text, keyboards.meal_result(meal.meal_id, ask_fat=ask)
+    return text, keyboards.meal_result(meal.meal_id, ask_fat=ask, topic=topic)
+
+
+def _shown_topic(callback: CallbackQuery) -> int | None:
+    """Тема с кнопки «💡» под сообщением, которое правится: при перерисовке кнопка остаётся."""
+    msg = callback.message
+    return keyboards.topic_of(msg.reply_markup) if isinstance(msg, Message) else None
+
+
+async def _offer_topic(deps: Deps, user: User, now: datetime, earlier: list[Meal]) -> int | None:
+    """Номер темы для кнопки под этой едой (v1.1 8) или None.
+
+    Условия: советы включены, сейчас ≥ 18:00 МСК, это первая еда сегодня с 18:00 (``earlier`` —
+    еда сегодня до этой), тема сегодня ещё не предлагалась, сегодня не было вопросов к ИИ.
+    """
+    local = to_local(now)
+    today = local.date()
+    if not user.tips_enabled or local.hour < TOPIC_HOUR or user.last_topic_offer_date == today:
+        return None
+    if any(to_local(m.eaten_at).hour >= TOPIC_HOUR for m in earlier):
+        return None
+    history = await deps.storage.recent_chat(user.user_id, now)
+    if any(m.role == "user" and to_local(m.created_at).date() == today for m in history):
+        return None
+    return user.next_topic
 
 
 async def _remaining(deps: Deps, user: User, day: date) -> float | None:
@@ -220,8 +251,9 @@ async def record_meal(
     meal_type = meal_type_for(local)
     has_norm = user.profile is not None and user.norm is not None
     overeat = False
+    before = await deps.storage.meals_on(user_id, today)
+    topic = await _offer_topic(deps, user, now, before)
     if has_norm:
-        before = await deps.storage.meals_on(user_id, today)
         day_before = sum(m.analysis.kcal for m in before)
         norm_kcal = await day_norm_kcal(deps, user, today)
         overeat = overeat_now(day_before, analysis.kcal, norm_kcal, user.last_overeat_date == today)
@@ -236,6 +268,9 @@ async def record_meal(
     await deps.storage.add_meal(meal)
     # Комментарий к тарелке (v1.1 5.3); при переборе вместо него — сообщение о переборе.
     note = texts.OVEREAT if overeat else (analysis.comment or None)
+    if topic is not None:
+        user.last_topic_offer_date = today
+        await deps.storage.save_user(user)
     if not has_norm:
         # До профиля вместо остатка — приглашение заполнить профиль, не чаще раза в день (v1.1 3, п. 2).
         hint = None
@@ -243,12 +278,12 @@ async def record_meal(
             hint = texts.PROFILE_HINT
             user.last_profile_hint_date = today
             await deps.storage.save_user(user)
-        text, markup = _render(meal, None, note, hint=hint)
+        text, markup = _render(meal, None, note, hint=hint, topic=topic)
     else:
         if overeat:
             user.last_overeat_date = today
             await deps.storage.save_user(user)
-        text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, note)
+        text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, note, topic=topic)
     if prefix:
         text = f"{prefix}\n\n{text}"
     if status_msg is None:
@@ -301,7 +336,8 @@ async def on_fat(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None
     meal.fat_answer = choice
     await deps.storage.update_meal(meal)
     await callback.answer()
-    text, markup = _render(meal, await _remaining(deps, user, meal.local_date), None)
+    remaining = await _remaining(deps, user, meal.local_date)
+    text, markup = _render(meal, remaining, None, topic=_shown_topic(callback))
     await _edit_or_send(callback.message, text, markup)
 
 
@@ -356,7 +392,8 @@ async def on_type_chosen(callback: CallbackQuery, deps: Deps) -> None:
     meal.meal_type = meal_type
     await deps.storage.update_meal(meal)
     await callback.answer()
-    text, markup = _render(meal, await _remaining(deps, user, meal.local_date), None)
+    remaining = await _remaining(deps, user, meal.local_date)
+    text, markup = _render(meal, remaining, None, topic=_shown_topic(callback))
     await _edit_or_send(callback.message, text, markup)
 
 

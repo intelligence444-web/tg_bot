@@ -1,4 +1,4 @@
-"""Ежедневные рассылки: напоминание о взвешивании, /stop_tips (спец. 9.3, 11, 13)."""
+"""Ежедневные рассылки: напоминание о взвешивании, недельный отчёт, /stop_tips (спец. 9.3, 11, 13; v1.1 10)."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -9,10 +9,13 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.methods import SendMessage
 
 from bot import texts
+from bot.calc import calculate_norm
 from bot.daily import run_daily
-from bot.models import User
+from bot.models import Profile, User
 from bot.storage import MemoryStorage
-from tests.fakes import BOT_TOKEN, MockedSession, get_fsm_state, make_callback, make_message, onboard
+from bot.vision import VisionUnavailable
+from tests.fakes import BOT_TOKEN, FakeVision, MockedSession, get_fsm_state, make_callback, make_message, onboard
+from tests.test_weekly import meal
 
 SAT = date(2026, 10, 24)
 MON = date(2026, 10, 26)
@@ -57,7 +60,7 @@ async def test_no_course_cards(env):
     await storage.save_user(_user(onboarded=tue - timedelta(days=3)))
     await storage.upsert_weight(1, tue - timedelta(days=1), 70.0)
     counts = await run_daily(storage, bot, at_9_msk(tue))
-    assert counts == {"reminders": 0, "deactivated": 0}
+    assert counts == {"reminders": 0, "deactivated": 0, "reports": 0}
     assert _sent(session) == []
     assert (await storage.get_user(1)).course_day == 0
 
@@ -70,7 +73,7 @@ async def test_monday_reminder_when_last_weighing_8_days_ago(env):
     await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     await storage.upsert_weight(1, MON - timedelta(days=8), 70.0)
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"reminders": 1, "deactivated": 0}
+    assert counts == {"reminders": 1, "deactivated": 0, "reports": 0}
     assert [m.text for m in _sent(session)] == [texts.WEIGH_REMINDER]
 
 
@@ -107,7 +110,7 @@ async def test_monday_reminder_without_weighings(env):
     storage, bot, session = env
     await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     counts = await run_daily(storage, bot, at_9_msk(MON))  # взвешиваний нет вовсе
-    assert counts == {"reminders": 1, "deactivated": 0}
+    assert counts == {"reminders": 1, "deactivated": 0, "reports": 0}
     assert [m.text for m in _sent(session)] == [texts.WEIGH_REMINDER]
 
 
@@ -115,7 +118,7 @@ async def test_tips_disabled_gets_nothing(env):
     storage, bot, session = env
     await storage.save_user(_user(onboarded=MON - timedelta(days=20), tips_enabled=False))
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"reminders": 0, "deactivated": 0}
+    assert counts == {"reminders": 0, "deactivated": 0, "reports": 0}
     assert _sent(session) == []
     assert (await storage.get_user(1)).course_day == 0
 
@@ -147,7 +150,7 @@ async def test_other_telegram_error_does_not_stop_run(env):
     await storage.save_user(_user(2, onboarded=old))
     session.fail(SendMessage, TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="Bad"), times=1)
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"reminders": 1, "deactivated": 0}
+    assert counts == {"reminders": 1, "deactivated": 0, "reports": 0}
     assert [(await storage.get_user(i)).is_active for i in (1, 2)] == [True, True]
 
 
@@ -252,7 +255,7 @@ async def test_stop_tips_after_list_is_respected():
     bot = Bot(token=BOT_TOKEN, session=session)
     await storage.save_user(_user(1, onboarded=MON - timedelta(days=20)))
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"reminders": 0, "deactivated": 0}
+    assert counts == {"reminders": 0, "deactivated": 0, "reports": 0}
     assert _sent(session) == []
     assert (await storage.get_user(1)).tips_enabled is False
 
@@ -272,7 +275,152 @@ async def test_storage_error_for_one_user_does_not_abort_run(caplog):
     await storage.save_user(_user(1, onboarded=old))
     await storage.save_user(_user(2, onboarded=old))
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"reminders": 1, "deactivated": 0}
+    assert counts == {"reminders": 1, "deactivated": 0, "reports": 0}
     assert {m.chat_id for m in _sent(session)} == {2}
     [rec] = [r for r in caplog.records if r.name == "bot.daily" and r.exc_info]
     assert rec.user_id == 1 and rec.error_kind == "daily"
+
+
+# --- недельный отчёт (v1.1 10) ---
+
+_PROFILE = Profile("female", 30, 165.0, 70.0, "moderate", "lose", 62.0)
+
+
+async def _report_user(storage, days_logged: int, **kw) -> None:
+    await storage.save_user(
+        _user(onboarded=MON - timedelta(days=30), profile=_PROFILE, norm=calculate_norm(_PROFILE), **kw)
+    )
+    await storage.upsert_weight(1, MON - timedelta(days=2), 70.0)  # без напоминания о весе
+    for i in range(days_logged):
+        await storage.add_meal(meal(MON - timedelta(days=7 - i), 1500, 80))
+
+
+async def test_monday_weekly_report_with_3_days(env):
+    storage, bot, session = env
+    await _report_user(storage, 3)
+    chat = FakeVision([], texts=["Добавь овощей к ужину."])
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts == {"reminders": 0, "deactivated": 0, "reports": 1}
+    [msg] = _sent(session)
+    assert msg.text.startswith(texts.WEEKLY_TITLE)
+    assert "3 из 7" in msg.text and "Добавь овощей к ужину." in msg.text
+    assert not isinstance(msg.parse_mode, str)  # простой текст
+    assert len(chat.completions) == 1
+    assert await storage.incr_ai_usage(1, MON) == 1  # лимит ИИ не тронут
+
+
+async def test_weekly_report_after_weigh_reminder(env):
+    storage, bot, session = env
+    await _report_user(storage, 3)
+    storage._weights.clear()
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет."]))
+    assert counts == {"reminders": 1, "deactivated": 0, "reports": 1}
+    texts_sent = [m.text for m in _sent(session)]
+    assert texts_sent[0] == texts.WEIGH_REMINDER and texts_sent[1].startswith(texts.WEEKLY_TITLE)
+
+
+async def test_no_weekly_report_with_2_days(env):
+    storage, bot, session = env
+    await _report_user(storage, 2)
+    chat = FakeVision([], texts=["Совет."])
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts["reports"] == 0 and _sent(session) == [] and chat.completions == []
+
+
+async def test_no_weekly_report_on_tuesday(env):
+    storage, bot, session = env
+    await _report_user(storage, 5)
+    counts = await run_daily(storage, bot, at_9_msk(MON + timedelta(days=1)), FakeVision([], texts=["Совет."]))
+    assert counts["reports"] == 0 and _sent(session) == []
+
+
+async def test_no_weekly_report_without_profile(env):
+    storage, bot, session = env
+    await storage.save_user(_user(onboarded=MON - timedelta(days=30)))
+    await storage.upsert_weight(1, MON - timedelta(days=2), 70.0)
+    for i in range(5):
+        await storage.add_meal(meal(MON - timedelta(days=7 - i), 1500, 80))
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет."]))
+    assert counts["reports"] == 0 and _sent(session) == []
+
+
+async def test_no_weekly_report_with_tips_disabled(env):
+    storage, bot, session = env
+    await _report_user(storage, 5, tips_enabled=False)
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет."]))
+    assert counts["reports"] == 0 and _sent(session) == []
+
+
+async def test_weekly_report_without_advice_when_model_fails(env):
+    storage, bot, session = env
+    await _report_user(storage, 4)
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=[VisionUnavailable("down")]))
+    assert counts["reports"] == 1
+    [msg] = _sent(session)
+    assert msg.text.startswith(texts.WEEKLY_TITLE) and "Совет" not in msg.text
+
+
+async def test_weekly_report_without_chat_client(env):
+    storage, bot, session = env
+    await _report_user(storage, 4)
+    counts = await run_daily(storage, bot, at_9_msk(MON))
+    assert counts["reports"] == 1
+    assert "Совет" not in _sent(session)[0].text
+
+
+async def test_weekly_report_forbidden_deactivates(env):
+    storage, bot, session = env
+    await _report_user(storage, 4)
+    session.fail(SendMessage, _forbidden())
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет."]))
+    assert counts == {"reminders": 0, "deactivated": 1, "reports": 0}
+    assert (await storage.get_user(1)).is_active is False
+
+
+class _StopTipsDuringAdvice(FakeVision):
+    def __init__(self, storage):
+        super().__init__([], texts=["Совет."])
+        self._storage = storage
+
+    async def complete(self, system, messages, max_tokens=1500):
+        u = await self._storage.get_user(1)
+        u.tips_enabled = False
+        await self._storage.save_user(u)
+        return await super().complete(system, messages, max_tokens)
+
+
+async def test_weekly_report_rereads_user_before_send(env):
+    storage, bot, session = env
+    await _report_user(storage, 4)
+    counts = await run_daily(storage, bot, at_9_msk(MON), _StopTipsDuringAdvice(storage))
+    assert counts["reports"] == 0 and _sent(session) == []
+
+
+async def test_daily_build_chat(monkeypatch, caplog):
+    import httpx  # noqa: PLC0415
+
+    from bot import daily  # noqa: PLC0415
+
+    monkeypatch.setenv("KIE_API_KEY", "k")
+    monkeypatch.setenv("VISION_PRIMARY", "openai:gemini-3-pro")
+    monkeypatch.delenv("VISION_FALLBACK", raising=False)
+    monkeypatch.delenv("CHAT_PRIMARY", raising=False)
+    monkeypatch.setenv("CHAT_FALLBACK", "openai:gemini-2.5-pro")
+    async with httpx.AsyncClient() as http:
+        client = daily.build_chat(http)
+        assert client.primary.model == "gemini-3-pro" and client.fallback.model == "gemini-2.5-pro"
+
+        monkeypatch.setenv("CHAT_PRIMARY", "claude:x")
+        monkeypatch.delenv("CHAT_FALLBACK")
+        client = daily.build_chat(http)
+        assert client.primary.model == "x" and client.fallback is None
+
+        monkeypatch.delenv("KIE_API_KEY")
+        caplog.clear()
+        assert daily.build_chat(http) is None
+        assert any(r.levelname == "WARNING" and getattr(r, "error_kind", None) == "config" for r in caplog.records)
+
+        monkeypatch.setenv("KIE_API_KEY", "k")
+        monkeypatch.delenv("CHAT_PRIMARY")
+        monkeypatch.delenv("VISION_PRIMARY")
+        assert daily.build_chat(http) is None

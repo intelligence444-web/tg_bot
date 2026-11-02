@@ -4,6 +4,8 @@
 → шаги → единица лимита ИИ → запрос «маршрутизатор-собеседник» (справка + история
 переписки) → по ``kind``: еда (общий путь ``meals.record_meal``), рацион, ответ собеседника,
 уточняющий вопрос. В лог не пишутся ни текст пользователя, ни справка, ни ответ модели.
+
+Кнопка темы ``topic:{n}`` (v1.1 8) — тот же путь с вопросом «Расскажи коротко: <тема>».
 """
 from __future__ import annotations
 
@@ -15,12 +17,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
-from bot import assistant, texts
+from bot import assistant, keyboards, texts
 from bot.assistant import DayContext, Plan, Routed
 from bot.calc import effective_norm
 from bot.diary import to_local
@@ -220,26 +222,39 @@ async def _save_pair(deps: Deps, user_id: int, question: str, answer: str) -> No
     await deps.storage.add_chat_message(user_id, ChatMessage("assistant", answer, now))
 
 
-async def handle_text(message: Message, state: FSMContext, deps: Deps, text: str, *, prefix: str = "") -> None:
+async def handle_text(
+    message: Message,
+    state: FSMContext,
+    deps: Deps,
+    text: str,
+    *,
+    prefix: str = "",
+    user_id: int | None = None,
+    question: bool = False,
+) -> None:
     """Текст пользователя (набранный или распознанный голос) по порядку v1.1 6.
 
     ``prefix`` — простой текст (не HTML) первой строкой ответа, например «🎙 Понял так: …»;
-    для ответов в HTML он экранируется здесь.
+    для ответов в HTML он экранируется здесь. ``user_id`` — когда ``message`` не от пользователя
+    (сообщение бота под нажатой кнопкой). ``question=True`` — заведомо вопрос (кнопка темы):
+    без шаблонов кодом, а еда и активность из ответа модели не записываются.
     """
-    user_id = message.from_user.id
+    if user_id is None:
+        user_id = message.from_user.id
     text = text.strip()
 
     # 1. Шаблоны кодом — без ИИ и без лимита.
-    if await handle_profile_text(message, state, deps, text):
-        return
-    kg = parse_weight_text(text)
-    if kg is not None:
-        await _weigh(message, state, deps, kg)
-        return
-    steps = parse_steps(text)
-    if steps is not None:
-        await record_steps(message, deps, steps, prefix=prefix)
-        return
+    if not question:
+        if await handle_profile_text(message, state, deps, text):
+            return
+        kg = parse_weight_text(text)
+        if kg is not None:
+            await _weigh(message, state, deps, kg)
+            return
+        steps = parse_steps(text)
+        if steps is not None:
+            await record_steps(message, deps, steps, prefix=prefix)
+            return
 
     # 2. Лимит ИИ: единица тратится до вызова модели.
     now = deps.clock()
@@ -283,6 +298,9 @@ async def handle_text(message: Message, state: FSMContext, deps: Deps, text: str
         await _send_plain(message, texts.NOT_UNDERSTOOD, prefix)
         return
     log.info("text routed: %s", routed.kind, extra={"user_id": user_id})
+    if question and routed.kind in ("food", "activity"):
+        await _send_plain(message, texts.NOT_UNDERSTOOD, prefix)
+        return
 
     if routed.kind == "food":
         if not _is_food(routed.analysis):
@@ -357,7 +375,34 @@ async def on_text(message: Message, state: FSMContext, deps: Deps) -> None:
     await handle_text(message, state, deps, message.text)
 
 
+async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
+    """Кнопка «💡 <тема>»: вопрос собеседнику, одна единица лимита (её тратит ``handle_text``)."""
+    n = keyboards.parse_topic(callback.data)
+    await callback.answer()
+    if n is None or not isinstance(callback.message, Message):
+        return
+    user_id = callback.from_user.id
+    user = await deps.storage.get_user(user_id)
+    if user is None:
+        return
+    if user.next_topic <= n:
+        user.next_topic = n + 1
+        await deps.storage.save_user(user)
+    # Кнопку убираем, чтобы повторное нажатие не тратило ещё запрос.
+    markup = callback.message.reply_markup
+    if markup is not None:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboards.without_topic(markup))
+        except TelegramAPIError:
+            pass  # не изменилось или сообщение старое — ответ всё равно придёт
+    topic = texts.TOPICS[n % len(texts.TOPICS)]
+    await handle_text(
+        callback.message, state, deps, texts.TOPIC_QUESTION.format(topic=topic), user_id=user_id, question=True
+    )
+
+
 def build_router() -> Router:
     r = Router(name="text")
     r.message.register(on_text, _is_plain_text, _no_state)
+    r.callback_query.register(on_topic, F.data.startswith(keyboards.CB_TOPIC))
     return r

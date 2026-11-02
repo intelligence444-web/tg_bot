@@ -192,6 +192,8 @@ BTN_FAT_SAUCE = "Соус…"
 BTN_MEAL_EDIT = "Изменить"
 BTN_MEAL_DELETE = "Удалить"
 BTN_MEAL_TYPE = "Сменить приём пищи"
+BTN_TOPIC = "💡 {topic}"
+TOPIC_QUESTION = "Расскажи коротко: {topic}"
 ASK_SAUCE = "Опиши соус текстом: какой и сколько, например «майонез, ложка»"
 ASK_CORRECTION = "Напиши, что поправить, например: «это гречка, 150 г»"
 ASK_MEAL_TYPE = "Выбери приём пищи кнопкой ниже"
@@ -336,3 +338,14 @@ PLAN_OPTION = "{n}. {text} — {kcal} ккал, Б {protein} / Ж {fat} / У {ca
 PLAN_TOTAL = "Итого за день (по первым вариантам): ~{kcal} ккал, Б {protein} / Ж {fat} / У {carbs} г"
 PLAN_APPROX = "Суммы примерные: ±{pct}% от нормы"
 PLAN_APPROX_NEAR = "Суммы примерные: калории близко к норме, белок и состав блюд — ориентир"
+
+# --- Недельный отчёт (v1.1 10), простой текст без разметки ---
+WEEKLY_TITLE = "📊 Итоги прошлой недели"
+WEEKLY_DAYS = "Дней с записями: {days} из 7"
+WEEKLY_AVG = "В среднем за день: {kcal} ккал, белок {protein} г"
+WEEKLY_IN_NORM = "В норме (±10%): {n} {word}"
+WEEKLY_ACTIVITY = "Активность: +{kcal} ккал к норме за неделю"
+WEEKLY_WEIGHT = "Вес за неделю (тренд): {delta} кг"
+WEEKLY_STREAK = "🔥 {n} {word} подряд с записями"
+WEEKLY_ADVICE = "Совет на неделю: {advice}"
+DAY_WORDS = ("день", "дня", "дней")
