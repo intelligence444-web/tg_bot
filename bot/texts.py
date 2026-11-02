@@ -199,6 +199,17 @@ CORRECTION_NOT_FOOD = "Не понял поправку — опиши еду е
 MEAL_DELETED = "Эта запись уже удалена"
 MEAL_REMOVED = "Удалил запись из дневника"
 
+# --- Активность (v1.1 9) ---
+ACTIVITY_REPLY = "{head} — ~{kcal} ккал, к норме сегодня +{credit} ккал. Осталось: {left} ккал"
+TRAINING_HEAD = "🏃 {name} {minutes} мин"
+STEPS_HEAD = "🚶 {steps} {word}"
+TRAINING_NAME = "Тренировка"
+STEP_WORDS = ("шаг", "шага", "шагов")
+STEPS_NAME = "Шаги"
+DIARY_ACTIVITY = "🏃 Активность: +{credit} ккал к норме"
+BTN_ACTIVITY_DELETE = "Удалить"
+ACTIVITY_REMOVED = "Удалил активность из дневника"
+
 # --- Текст и ИИ-собеседник (v1.1 6, 13, 14) ---
 NOT_UNDERSTOOD = "Не понял, попробуй сформулировать иначе"
 NOT_FOOD_TEXT = "Не получилось разобрать еду — опиши подробнее, например: «гречка 150 г и котлета»"

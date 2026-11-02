@@ -23,8 +23,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot import keyboards, texts
-from bot.calc import effective_norm, format_num
+from bot.calc import format_num
 from bot.diary import meal_type_for, overeat_now, to_local
+from bot.handlers.activity import day_norm_kcal
 from bot.limits import take_ai
 from bot.models import Analysis, Meal, MealType, User
 from bot.vision import BadImage, VisionError, VisionUnavailable, prepare_image
@@ -101,11 +102,12 @@ def _render(
 
 
 async def _remaining(deps: Deps, user: User, day: date) -> float | None:
-    """Остаток нормы на день; без профиля — None."""
-    if user.profile is None or user.norm is None:
+    """Остаток нормы дня (с добавкой активности); без профиля — None."""
+    norm = await day_norm_kcal(deps, user, day)
+    if norm is None:
         return None
     meals = await deps.storage.meals_on(user.user_id, day)
-    return effective_norm(user, day).kcal - sum(m.analysis.kcal for m in meals)
+    return norm - sum(m.analysis.kcal for m in meals)
 
 
 def _is_food(a: Analysis) -> bool:
@@ -221,7 +223,7 @@ async def record_meal(
     if has_norm:
         before = await deps.storage.meals_on(user_id, today)
         day_before = sum(m.analysis.kcal for m in before)
-        norm_kcal = effective_norm(user, today).kcal
+        norm_kcal = await day_norm_kcal(deps, user, today)
         overeat = overeat_now(day_before, analysis.kcal, norm_kcal, user.last_overeat_date == today)
     meal = Meal(
         user_id=user_id,

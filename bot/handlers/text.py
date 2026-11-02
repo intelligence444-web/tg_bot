@@ -1,7 +1,7 @@
 """Маршрутизатор текста (v1.1 6, 7, 13): шаблоны кодом, затем один запрос к модели.
 
 Текст вне состояний FSM, не команда и не кнопка меню: строка профиля → вес («85», «вес 85,5»)
-→ шаги (Task 9) → единица лимита ИИ → запрос «маршрутизатор-собеседник» (справка + история
+→ шаги → единица лимита ИИ → запрос «маршрутизатор-собеседник» (справка + история
 переписки) → по ``kind``: еда (общий путь ``meals.record_meal``), рацион, ответ собеседника,
 уточняющий вопрос. В лог не пишутся ни текст пользователя, ни справка, ни ответ модели.
 """
@@ -24,12 +24,13 @@ from bot import assistant, texts
 from bot.assistant import DayContext, Plan, Routed
 from bot.calc import effective_norm
 from bot.diary import to_local
+from bot.handlers.activity import day_norm_kcal, record_steps, record_training
 from bot.handlers.meals import VISION_BUDGET_S, _alert_no_credits, _is_food, record_meal
 from bot.handlers.onboarding import handle_profile_text
 from bot.handlers.weight import ask_profile, load_profile_user, today_for, weighing_reply
 from bot.limits import take_ai
 from bot.models import ChatMessage, User
-from bot.profile_line import parse_weight_text
+from bot.profile_line import parse_steps, parse_weight_text
 from bot.progress import trend_weight
 from bot.vision import BadResponse, VisionClient, VisionError, VisionUnavailable
 
@@ -52,15 +53,15 @@ _TAG = re.compile(r"<[^>]+>")
 async def build_day_context(deps: Deps, user: User, now: datetime) -> DayContext:
     """Справка для модели: все числа считает код (v1.1 7.1).
 
-    Норма дня — ``effective_norm`` плюс кредит активности за день (Task 9 вынесет это в
-    ``day_norm_kcal``). Итоги недели — 7 полных дней до сегодняшнего, по дням с записями еды.
+    Норма сегодня — ``day_norm_kcal`` (норма плюс кредит активности). Итоги недели — 7 полных
+    дней до сегодняшнего, по дням с записями еды; кредит за неделю читается одним запросом.
     """
     local = to_local(now)
     today = local.date()
     uid = user.user_id
     has_norm = user.profile is not None and user.norm is not None
 
-    async def norm_on(day: date, credit: float) -> float | None:
+    def norm_on(day: date, credit: float) -> float | None:
         return effective_norm(user, day).kcal + credit if has_norm else None
 
     meals = await deps.storage.meals_on(uid, today)
@@ -71,8 +72,7 @@ async def build_day_context(deps: Deps, user: User, now: datetime) -> DayContext
         sum(m.analysis.fat for m in meals),
         sum(m.analysis.carbs for m in meals),
     )
-    credit_today = sum(a.kcal_credit for a in await deps.storage.activities_on(uid, today))
-    norm_kcal = await norm_on(today, credit_today)
+    norm_kcal = await day_norm_kcal(deps, user, today)
     norm_protein = effective_norm(user, today).protein_g if has_norm else None
 
     week_start, week_end = today - timedelta(days=WEEK_DAYS), today - timedelta(days=1)
@@ -90,7 +90,7 @@ async def build_day_context(deps: Deps, user: User, now: datetime) -> DayContext
         week_avg_kcal = sum(k for k, _ in by_day.values()) / len(by_day)
         week_avg_protein = sum(p for _, p in by_day.values()) / len(by_day)
         for day, (kcal, _) in by_day.items():
-            norm = await norm_on(day, credits.get(day, 0.0))
+            norm = norm_on(day, credits.get(day, 0.0))
             if norm and abs(kcal - norm) <= IN_NORM * norm:
                 in_norm += 1
 
@@ -236,7 +236,10 @@ async def handle_text(message: Message, state: FSMContext, deps: Deps, text: str
     if kg is not None:
         await _weigh(message, state, deps, kg)
         return
-    # шаги — Task 9
+    steps = parse_steps(text)
+    if steps is not None:
+        await record_steps(message, deps, steps, prefix=prefix)
+        return
 
     # 2. Лимит ИИ: единица тратится до вызова модели.
     now = deps.clock()
@@ -290,9 +293,7 @@ async def handle_text(message: Message, state: FSMContext, deps: Deps, text: str
         await record_meal(message, deps, fresh, routed.analysis, status_msg=None, prefix=prefix)
         return
     if routed.kind == "activity":
-        # Тренировки подключает Task 9.
-        log.info("activity kind not handled yet", extra={"user_id": user_id, "error_kind": "activity"})
-        await _send_plain(message, texts.NOT_UNDERSTOOD, prefix)
+        await record_training(message, deps, routed.activity_name, routed.minutes, routed.met, prefix=prefix)
         return
     if routed.kind == "plan":
         await _reply_plan(

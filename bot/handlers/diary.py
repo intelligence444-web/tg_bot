@@ -10,6 +10,7 @@ from aiogram.types import Message
 from bot import keyboards, texts
 from bot.calc import effective_norm
 from bot.diary import format_day, format_eaten, summarize, to_local
+from bot.handlers.activity import day_credit
 from bot.progress import streak
 
 if TYPE_CHECKING:
@@ -29,7 +30,8 @@ async def on_today(message: Message, deps: Deps) -> None:
         await message.answer(text, reply_markup=keyboards.main_menu())
         return
     days = await deps.storage.meal_days(user_id, today - STREAK_LOOKBACK)
-    text = format_day(summarize(meals), effective_norm(user, today), streak(days, today))
+    credit = await day_credit(deps, user_id, today)
+    text = format_day(summarize(meals), effective_norm(user, today), streak(days, today), credit)
     await message.answer(text, reply_markup=keyboards.main_menu())
 
 

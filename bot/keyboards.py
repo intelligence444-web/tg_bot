@@ -57,6 +57,8 @@ CB_MEAL_EDIT = "meal:edit:"  # meal:edit:{meal_id}
 CB_MEAL_DEL = "meal:del:"  # meal:del:{meal_id}
 CB_MEAL_TYPE = "meal:type:"  # meal:type:{meal_id}
 CB_MT = "mt:"  # mt:{meal_id}:{breakfast|lunch|snack|dinner}
+# Активность (v1.1 9). Не «act:del:» — префикс «act:» занят кнопками уровня активности анкеты.
+CB_ACT_DEL = "actdel:"  # actdel:{activity_id}
 
 
 def meal_result(meal_id: str, ask_fat: bool) -> InlineKeyboardMarkup:
@@ -82,6 +84,10 @@ def meal_result(meal_id: str, ask_fat: bool) -> InlineKeyboardMarkup:
     )
     rows.append([(texts.BTN_MEAL_TYPE, f"{CB_MEAL_TYPE}{meal_id}")])
     return _inline(rows)
+
+
+def activity_result(activity_id: str) -> InlineKeyboardMarkup:
+    return _inline([[(texts.BTN_ACTIVITY_DELETE, f"{CB_ACT_DEL}{activity_id}")]])
 
 
 def meal_types(meal_id: str) -> InlineKeyboardMarkup:

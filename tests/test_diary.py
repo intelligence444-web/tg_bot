@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from bot import texts
-from bot.calc import Profile, calculate_norm
+from bot.calc import Profile, calculate_norm, format_num
 from bot.diary import DaySummary, format_day, meal_type_for, overeat_now, summarize, to_local
 from bot.models import Analysis, FoodItem, Meal
 
@@ -97,3 +97,22 @@ def test_overeat_now():
     assert overeat_now(1200, 400, 1500, False) is True
     assert overeat_now(1200, 400, 1500, True) is False  # уже было сегодня
     assert overeat_now(1600, 300, 1500, False) is False  # норма превышена до приёма
+
+
+def test_format_day_activity_credit():
+    credit = 210.0
+    text = format_day(ref_summary(), NORM, 0, activity_credit=credit)
+    lines = text.split("\n")
+    total = NORM.kcal + credit
+    assert lines[0].startswith(f"📅 Сегодня — 1 245 / {format_num(total)} ккал")
+    assert f"{format_num(1245 / total * 100)}%" in lines[0]
+    assert "🏃 Активность: +210 ккал к норме" in lines
+    # строка активности — сразу после приёмов пищи, затем пустая строка и белок
+    i = lines.index("🏃 Активность: +210 ккал к норме")
+    assert lines[i - 1].startswith(texts.MEAL_LABELS["dinner"]) and lines[i + 1] == ""
+    left = format_num(total - 1245)
+    assert f"можно ещё {left} ккал" in text
+
+
+def test_format_day_no_activity_line_without_credit():
+    assert "Активность" not in format_day(ref_summary(), NORM, 0)

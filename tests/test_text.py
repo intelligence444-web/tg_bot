@@ -209,14 +209,6 @@ async def test_garbage_then_valid(bot_env):
     assert session.last_message().text == "Ок"
 
 
-async def test_activity_kind_not_understood_for_now(bot_env):
-    reply = json.dumps({"kind": "activity", "name": "бег", "minutes": 30, "met": 8})
-    dp, bot, session, deps = await _setup(bot_env, [reply])
-    await dp.feed_update(bot, make_message("пробежал 30 минут"))
-    assert session.texts()[-1] == texts.NOT_UNDERSTOOD
-    assert await deps.storage.recent_chat(1, deps.clock()) == []
-
-
 async def test_ai_limit_blocks_third_text_but_weight_works(bot_env):
     dp, bot, session, deps = await _setup(bot_env, [chat_json("1"), chat_json("2")], ai_limit=2)
     await dp.feed_update(bot, make_message("вопрос 1"))

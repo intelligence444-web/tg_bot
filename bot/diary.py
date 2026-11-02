@@ -53,14 +53,16 @@ def summarize(meals: list[Meal]) -> DaySummary:
     )
 
 
-def format_day(summary: DaySummary, norm: Norm, streak_days: int) -> str:
-    filled = max(0, min(10, math.floor(summary.kcal / norm.kcal * 10)))
+def format_day(summary: DaySummary, norm: Norm, streak_days: int, activity_credit: float = 0.0) -> str:
+    """Дневник дня; ``activity_credit`` — добавка активности к норме (v1.1 9)."""
+    norm_kcal = norm.kcal + activity_credit
+    filled = max(0, min(10, math.floor(summary.kcal / norm_kcal * 10)))
     bar = "▓" * filled + "░" * (10 - filled)
-    pct = format_num(summary.kcal / norm.kcal * 100)
-    left = format_num(max(0.0, norm.kcal - summary.kcal))
+    pct = format_num(summary.kcal / norm_kcal * 100)
+    left = format_num(max(0.0, norm_kcal - summary.kcal))
     lines = [
         texts.DIARY_TITLE.format(
-            eaten=format_num(summary.kcal), norm=format_num(norm.kcal), bar=bar, pct=pct
+            eaten=format_num(summary.kcal), norm=format_num(norm_kcal), bar=bar, pct=pct
         )
     ]
     if streak_days >= 2:
@@ -73,6 +75,8 @@ def format_day(summary: DaySummary, norm: Norm, streak_days: int) -> str:
             lines.append(texts.MEAL_LINE.format(label=label, kcal=format_num(summary.by_type[mt])))
         else:
             lines.append(texts.MEAL_EMPTY.format(label=label, left=left))
+    if activity_credit > 0:
+        lines.append(texts.DIARY_ACTIVITY.format(credit=format_num(activity_credit)))
     lines.append("")
     lines.append(
         texts.DIARY_PROTEIN.format(
