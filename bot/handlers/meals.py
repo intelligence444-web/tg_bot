@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, TypeVar, get_args
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
@@ -24,6 +25,7 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMark
 from bot import keyboards, texts
 from bot.calc import effective_norm, format_num
 from bot.diary import meal_type_for, overeat_now, to_local
+from bot.limits import take_ai
 from bot.models import Analysis, Meal, MealType, User
 from bot.vision import BadImage, VisionError, VisionUnavailable, prepare_image
 
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from bot.app import Deps
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 FAT_GRAMS = {"none": 0.0, "little": 10.0, "much": 20.0}
 MEAL_TYPES: tuple[MealType, ...] = get_args(MealType)
@@ -124,7 +127,7 @@ async def _edit_or_send(
         await target.answer(text, reply_markup=markup)
 
 
-async def _vision_call(call) -> Analysis:
+async def _vision_call(call: Awaitable[T]) -> T:
     """Распознавание в пределах ``VISION_BUDGET_S``; не уложились — как «сервис недоступен»."""
     try:
         async with asyncio.timeout(VISION_BUDGET_S):
@@ -158,6 +161,11 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
 
     if await state.get_state() in (MealEdit.correction.state, MealEdit.sauce.state):
         await state.clear()
+    # Единица лимита тратится до вызова модели; остальные фото альбома отсечены выше.
+    if not await take_ai(deps.storage, user_id, to_local(now).date(), deps.ai_limit):
+        log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
+        await message.answer(texts.AI_LIMIT)
+        return
 
     status = await message.answer(texts.ANALYZING)
     file_id = message.photo[-1].file_id if message.photo else message.document.file_id
@@ -191,7 +199,19 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
     # Распознавание идёт до полутора минут: за это время пользователь мог измениться
     # (/stop_tips), поэтому пишем поверх свежей записи, а не старой.
     user = await deps.storage.get_user(user_id) or User(user_id=user_id)
+    await record_meal(message, deps, user, analysis, status_msg=status)
 
+
+async def record_meal(
+    message: Message, deps: Deps, user: User, analysis: Analysis, *, status_msg: Message | None, prefix: str = ""
+) -> None:
+    """Общий путь после распознавания (фото, текст, голос): запись, перебор, комментарий,
+    подсказка профиля и кнопки. ``user`` — свежая запись, прочитанная после вызова модели.
+
+    ``status_msg`` — сообщение «Анализирую…», которое заменяется ответом (None — ответ новым
+    сообщением). ``prefix`` — простой текст первой строкой ответа (голос: «🎙 Понял так: …»).
+    """
+    user_id = user.user_id
     now = deps.clock()
     local = to_local(now)
     today = local.date()
@@ -212,6 +232,8 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         analysis=analysis,
     )
     await deps.storage.add_meal(meal)
+    # Комментарий к тарелке (v1.1 5.3); при переборе вместо него — сообщение о переборе.
+    note = texts.OVEREAT if overeat else (analysis.comment or None)
     if not has_norm:
         # До профиля вместо остатка — приглашение заполнить профиль, не чаще раза в день (v1.1 3, п. 2).
         hint = None
@@ -219,15 +241,18 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
             hint = texts.PROFILE_HINT
             user.last_profile_hint_date = today
             await deps.storage.save_user(user)
-        text, markup = _render(meal, None, hint=hint)
-        await _edit_or_send(status, text, markup)
-        return
-    if overeat:
-        user.last_overeat_date = today
-        await deps.storage.save_user(user)
-
-    text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, texts.OVEREAT if overeat else None)
-    await _edit_or_send(status, text, markup)
+        text, markup = _render(meal, None, note, hint=hint)
+    else:
+        if overeat:
+            user.last_overeat_date = today
+            await deps.storage.save_user(user)
+        text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, note)
+    if prefix:
+        text = f"{prefix}\n\n{text}"
+    if status_msg is None:
+        await message.answer(text, reply_markup=markup)
+    else:
+        await _edit_or_send(status_msg, text, markup)
 
 
 # --- кнопки под результатом ---
@@ -349,6 +374,10 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
     text = message.text
     if current == MealEdit.sauce.state:
         text = SAUCE_PREFIX + text
+    if not await take_ai(deps.storage, user_id, to_local(deps.clock()).date(), deps.ai_limit):
+        log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
+        await message.answer(texts.AI_LIMIT)
+        return
     try:
         analysis = await _vision_call(deps.vision.correct(meal.analysis, text))
     except VisionError:

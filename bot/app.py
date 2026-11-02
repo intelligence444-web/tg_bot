@@ -26,6 +26,8 @@ class Deps:
     admin_chat_id: int | None
     rng: random.Random
     speech: SpeechClient | None = None
+    chat: VisionClient | None = None  # маршрутизатор-собеседник; None — тот же клиент, что ``vision``
+    ai_limit: int = 50  # запросов к ИИ в день на пользователя (v1.1 13)
 
 
 class ReactivateMiddleware(BaseMiddleware):

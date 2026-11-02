@@ -3,20 +3,27 @@
 Все роутеры работают только в личных чатах: сообщения из групп молча пропускаются.
 
 Порядок важен: ``start`` (команды и согласие) → ``consent_gate`` (всё остальное без согласия)
-→ ``meal_edit_escape`` (кнопка меню или команда закрывает правку записи) → ``commands`` (/stop_tips, /start_tips, «❓ Помощь» — в любом состоянии) → ``onboarding`` (шаги профиля по состояниям; до Task 8 — и строка профиля вне состояний) → сценарии следующих задач → ``fallback``.
+→ ``meal_edit_escape`` (кнопка меню или команда закрывает правку записи) → ``commands`` (/stop_tips, /start_tips, «❓ Помощь» — в любом состоянии) → ``onboarding`` (шаги профиля по состояниям) → сценарии (``weight``, ``meals``, ``diary``, ``profile``) → ``text`` (маршрутизатор текста вне состояний: профиль, вес, ИИ) → ``fallback``.
 Новые роутеры добавляются в ``_feature_routers`` — ``fallback`` всегда последний.
 """
 from __future__ import annotations
 
 from aiogram import F, Router
 
-from bot.handlers import diary, fallback, meals, onboarding, profile, start, weight
+from bot.handlers import diary, fallback, meals, onboarding, profile, start, text, weight
 
 
 def _feature_routers() -> list[Router]:
     # weight — первым: сообщение в состоянии ввода веса, кроме числа, сбрасывает это состояние
     # (SkipHandler) и уходит дальше, в том числе к фото и кнопкам меню.
-    return [weight.build_router(), meals.build_router(), diary.build_router(), profile.build_router()]
+    # text — последним: ловит любой текст вне состояний FSM (не команду и не кнопку меню).
+    return [
+        weight.build_router(),
+        meals.build_router(),
+        diary.build_router(),
+        profile.build_router(),
+        text.build_router(),
+    ]
 
 
 def build_router() -> Router:

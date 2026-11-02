@@ -214,11 +214,13 @@ async def test_partial_profile_line_gives_example_with_ranges(bot_env):
     assert await get_fsm_state(dp) is None
 
 
-async def test_non_profile_text_falls_through(bot_env):
+async def test_non_profile_text_goes_to_assistant(bot_env):
     dp, bot, session, deps = bot_env
+    deps.vision = FakeVision([], texts=['{"kind": "chat", "reply": "Привет!"}'])
     await _consent(dp, bot)
     await dp.feed_update(bot, make_message("привет"))
-    assert session.last_message().text == texts.FALLBACK
+    assert session.last_message().text == "Привет!"
+    assert await get_fsm_state(dp) is None
 
 
 async def test_full_reference_example(bot_env):
@@ -423,11 +425,12 @@ async def test_repeat_line_with_profile_changes_goal_only_after_summary(bot_env)
     assert [(w.day, w.weight_kg) for w in await deps.storage.weights(1)] == [(TODAY, 70), (later, 68)]
 
 
-async def test_free_text_after_profile_gets_fallback(bot_env):
+async def test_free_text_after_profile_goes_to_assistant(bot_env):
     dp, bot, session, deps = bot_env
+    deps.vision = FakeVision([], texts=['{"kind": "chat", "reply": "Привет!"}'])
     await onboard(dp, bot)
     await dp.feed_update(bot, make_message("привет"))
-    assert session.last_message().text == texts.FALLBACK
+    assert session.last_message().text == "Привет!"
 
 
 async def test_start_again_after_profile_shows_menu(bot_env):

@@ -160,7 +160,7 @@ async def test_message_from_inactive_user_reactivates(bot_env):
     user = await deps.storage.get_user(1)
     user.is_active = False
     await deps.storage.save_user(user)
-    await dp.feed_update(bot, make_message("привет"))
+    await dp.feed_update(bot, make_message(texts.BTN_TODAY))
     assert (await deps.storage.get_user(1)).is_active is True
 
 

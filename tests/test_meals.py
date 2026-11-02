@@ -183,10 +183,12 @@ async def test_meal_edit_correction(bot_env):
     stored = await deps.storage.get_meal(1, meal.meal_id)
     assert stored.analysis.kcal == 165
     assert "🍽 Гречка — 150 г — 165 ккал" in session.texts()[-1]
-    # состояние сброшено: следующий текст — обычный fallback
+    # состояние сброшено: следующий текст уходит в маршрутизатор, а не в правку
     session.clear()
+    deps.vision.texts.append('{"kind": "chat", "reply": "Привет!"}')
     await dp.feed_update(bot, make_message("привет"))
-    assert session.texts()[-1] == texts.FALLBACK
+    assert session.texts()[-1] == "Привет!"
+    assert [c[0] for c in deps.vision.calls].count("correct") == 1
 
 
 async def test_meal_edit_vision_unavailable_keeps_record(bot_env):

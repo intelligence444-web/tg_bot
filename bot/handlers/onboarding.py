@@ -1,8 +1,8 @@
 """Профиль одной строкой (v1.1 3, 4) и расчёт нормы (спец. 6.3, 7).
 
 Строка профиля («жен, 1996, 165, 70») разбирается ``bot.profile_line.parse_profile_line``;
-``handle_profile_text`` вызывается для текста вне состояний FSM (до Task 8 — временным
-обработчиком этого роутера). Дальше — состояния ``ProfileFlow``: подтверждение
+``handle_profile_text`` вызывается маршрутизатором текста (``bot.handlers.text``) для текста
+вне состояний FSM. Дальше — состояния ``ProfileFlow``: подтверждение
 (``pf:yes`` / ``pf:no``) → активность (``act:``) → цель (``goal:``) → желаемый вес
 (число; ``bmi:retry`` / ``bmi:ok`` при ИМТ < 18,5) → итог.
 
@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aiogram import F, Router
-from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -86,13 +85,16 @@ async def start_profile_flow(message: Message, state: FSMContext, parsed: Parsed
     await message.answer(_confirm_text(data), reply_markup=keyboards.profile_confirm())
 
 
-async def handle_profile_text(message: Message, state: FSMContext, deps: Deps) -> bool:
+async def handle_profile_text(
+    message: Message, state: FSMContext, deps: Deps, text: str | None = None
+) -> bool:
     """Строка профиля → подтверждение; похожая, но неразборчивая → пример с диапазонами.
 
+    ``text`` — разбираемый текст (по умолчанию ``message.text``; для голоса — распознанный).
     ``True``, если текст был профилем или «partial» (ответ отправлен), иначе ``False``.
     """
     today = to_local(deps.clock()).date()
-    parsed = parse_profile_line(message.text or "", today)
+    parsed = parse_profile_line(message.text or "" if text is None else text, today)
     if parsed is None:
         return False
     if parsed == "partial":
@@ -329,12 +331,6 @@ async def stay_in_profile_flow(message: Message, state: FSMContext, raw_state: s
     return False
 
 
-async def on_profile_text(message: Message, state: FSMContext, deps: Deps) -> None:
-    """Временный обработчик текста вне состояний (Task 8 заменит его маршрутизатором текста)."""
-    if not await handle_profile_text(message, state, deps):
-        raise SkipHandler
-
-
 def build_router() -> Router:
     r = Router(name="onboarding")
     r.message.filter(stay_in_profile_flow)
@@ -349,9 +345,4 @@ def build_router() -> Router:
         on_button_step_message, StateFilter(ProfileFlow.confirm, ProfileFlow.activity, ProfileFlow.goal)
     )
     r.message.register(on_target, StateFilter(ProfileFlow.target))
-    r.message.register(
-        on_profile_text,
-        StateFilter(None),
-        F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_TEXTS),
-    )
     return r
