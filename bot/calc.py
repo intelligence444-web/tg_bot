@@ -108,3 +108,15 @@ def effective_norm(user: User, today: date) -> Norm:
     if until is not None and today > until and user.profile is not None:
         return calculate_norm(user.profile)
     return user.norm
+
+
+def steps_kcal(steps: int, weight_kg: float) -> float:
+    return steps * weight_kg * 0.0005
+
+
+def training_kcal(met: float, minutes: float, weight_kg: float) -> float:
+    return max(0.0, met - 1) * weight_kg * minutes / 60
+
+
+def activity_credit(kcal: float) -> float:
+    return kcal / 2

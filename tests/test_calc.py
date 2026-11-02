@@ -1,6 +1,7 @@
 import pytest
 
 from bot.calc import (
+    activity_credit,
     bmi,
     bmr,
     calculate_norm,
@@ -10,7 +11,9 @@ from bot.calc import (
     planned_pace_kg_week,
     planned_weeks_to_goal,
     round_half_up,
+    steps_kcal,
     target_bmi_low,
+    training_kcal,
 )
 from bot.models import Profile
 
@@ -107,3 +110,10 @@ def test_format_num():
 )
 def test_parse_number(text, expected):
     assert parse_number(text, 30, 300) == expected
+
+
+def test_activity_formulas():
+    assert steps_kcal(10_000, 70) == pytest.approx(350)
+    assert training_kcal(8, 30, 87) == pytest.approx(304.5)
+    assert training_kcal(0.5, 30, 87) == 0
+    assert activity_credit(520) == 260
