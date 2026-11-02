@@ -368,8 +368,6 @@ def test_system_prompt_kinds():
     assert "тренировк" in p
     assert "меню или рацион" in p
     assert "уточняющий вопрос" in p
-    # схема распознавания еды переиспользована из vision
-    assert vision.ANALYSIS_JSON in p
     assert '"minutes"' in p and '"met"' in p
     assert "1–600" in p and "1–20" in p
 
@@ -382,3 +380,83 @@ def test_system_prompt_plan_rules():
     assert "kcal ≈ 4·protein + 4·carbs + 9·fat" in p
     assert "исключения" in p
     assert "±10%" in p and "90%" in p
+
+
+# ---------- правки ревью (раунд 1) ----------
+
+def test_system_prompt_general_safety_applies_to_all_kinds():
+    p = assistant.SYSTEM_PROMPT
+    assert "ОБЩИЕ ПРАВИЛА — для любого вида ответа" in p
+    assert '"notes" рациона' in p and '"comment" к еде' in p
+    assert "ни в ответе, ни в рационе, ни в комментарии" in p
+    # плановые/дефицитные запросы при медицинских случаях и РПП → chat
+    assert "просит рацион или дефицит калорий" in p
+    assert 'рацион не составляй: выбери "chat", ответь бережно' in p
+    # рацион без профиля → chat с предложением заполнить профиль
+    assert "«Профиля нет» или нет нормы" in p
+    assert "одной строкой предложи сначала заполнить профиль" in p
+    # общие правила идут до выбора вида
+    assert p.index("ОБЩИЕ ПРАВИЛА") < p.index("КАК ВЫБРАТЬ ВИД ОТВЕТА")
+
+
+def test_system_prompt_latest_context_only():
+    assert "используй только последнюю справку" in assistant.SYSTEM_PROMPT
+
+
+def test_system_prompt_examples_parse():
+    p = assistant.SYSTEM_PROMPT
+    assert '"high | medium | low"' not in p
+    assert vision.ANALYSIS_JSON.replace('"high | medium | low"', '"medium"') in p
+    examples = [line for line in p.splitlines() if line.startswith('{"kind"')]
+    kinds = {parse_routed(line).kind for line in examples}
+    assert kinds == {"food", "activity", "plan", "chat", "unclear"}
+    food = parse_routed(assistant.FOOD_EXAMPLE)
+    assert food.analysis.confidence == "medium" and food.analysis.items
+
+
+def test_system_prompt_limits_from_vision():
+    p = assistant.SYSTEM_PROMPT
+    assert f"Граммы не больше {vision.MAX_GRAMS}" in p
+    assert f"не больше {vision.MAX_KCAL}" in p
+
+
+def test_routed_extracts_object_from_text():
+    raw = 'Вот ответ: {"kind": "chat", "reply": "Привет"} — надеюсь, помог'
+    assert parse_routed(raw).reply == "Привет"
+    with pytest.raises(BadResponse):
+        parse_routed("текст { не json }")
+    with pytest.raises(BadResponse):
+        parse_routed("} наоборот {")
+
+
+def test_context_weight_label_without_trend():
+    text = build_context_text(_ctx(trend_kg=None, week_change_kg=None))
+    assert "вес 86 кг" in text and "по тренду" not in text
+    assert "вес по тренду 85,2 кг" in build_context_text(_ctx())
+
+
+def test_format_plan_near_norm_without_percent():
+    plan = parse_routed(json.dumps(GOOD_PLAN)).plan
+    text = format_plan(plan, 0.0)
+    assert "Суммы примерные" in text and "±0%" not in text and "%" not in text
+    text = format_plan(plan, 9.6)
+    assert "Суммы примерные" in text and "±10%" not in text
+    assert "±11% от нормы" in format_plan(plan, -10.6)
+
+
+def test_html_split_long_paragraph_by_lines():
+    lines = [f"- пункт {i}: " + "белок " * 20 for i in range(80)]
+    text = "\n".join(line.strip() for line in lines)
+    assert len(text) > 8000
+    parts = to_telegram_html(text)
+    assert len(parts) >= 2 and all(len(p) <= 4000 for p in parts)
+    assert "\n".join(parts) == text
+    assert all(p.startswith("- пункт") for p in parts)
+
+
+def test_html_italic_triple_bold_links():
+    assert to_telegram_html("*мягко* и ***важно***") == ["мягко и <b>важно</b>"]
+    assert to_telegram_html("2 * 3 * 4") == ["2 * 3 * 4"]
+    assert to_telegram_html("см. [статью](https://example.com/a_b) & **итог**") == [
+        "см. статью &amp; <b>итог</b>"
+    ]

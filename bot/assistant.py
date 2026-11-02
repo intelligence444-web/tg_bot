@@ -12,7 +12,14 @@ from typing import Any, Literal
 from bot import texts
 from bot.calc import format_num
 from bot.models import Analysis, MealType, Profile
-from bot.vision import ANALYSIS_JSON, BadResponse, MAX_COMMENT, parse_analysis
+from bot.vision import (
+    ANALYSIS_JSON,
+    MAX_COMMENT,
+    MAX_GRAMS,
+    MAX_KCAL,
+    BadResponse,
+    parse_analysis,
+)
 
 RoutedKind = Literal["food", "activity", "plan", "chat", "unclear"]
 
@@ -66,14 +73,17 @@ def build_context_text(ctx: DayContext) -> str:
     if p is None:
         lines.append("Профиля нет — норма не рассчитана")
     else:
-        weight = ctx.trend_kg if ctx.trend_kg is not None else p.weight_kg
+        if ctx.trend_kg is not None:
+            weight = f"вес по тренду {format_num(ctx.trend_kg, 1)} кг"
+        else:
+            weight = f"вес {format_num(p.weight_kg, 1)} кг"
         age_word = texts.plural(p.age, *texts.YEAR_WORDS)
         goal = texts.GOAL_LABELS[p.goal].lower()
         if p.target_weight_kg is not None:
             goal += f", желаемый вес {format_num(p.target_weight_kg, 1)} кг"
         lines.append(
             f"Профиль: {texts.SEX_LABELS[p.sex]} пол, {p.age} {age_word}, "
-            f"рост {format_num(p.height_cm)} см, вес по тренду {format_num(weight, 1)} кг, "
+            f"рост {format_num(p.height_cm)} см, {weight}, "
             f"активность: {texts.ACTIVITY_LABELS[p.activity].lower()}, цель: {goal}"
         )
 
@@ -128,40 +138,78 @@ def build_context_text(ctx: DayContext) -> str:
 
 # ---------- системная инструкция ----------
 
+def _example(obj: dict) -> str:
+    return json.dumps(obj, ensure_ascii=False)
+
+
+_CONFIDENCE_PLACEHOLDER = '"high | medium | low"'
+if _CONFIDENCE_PLACEHOLDER not in ANALYSIS_JSON:  # pragma: no cover - защита от правки vision.py
+    raise RuntimeError("vision.ANALYSIS_JSON changed: update assistant prompt")
+# В схеме vision уверенность записана перечислением; в примере маршрутизатора — конкретное значение.
+_ANALYSIS_JSON = ANALYSIS_JSON.replace(_CONFIDENCE_PLACEHOLDER, '"medium"')
+
+FOOD_EXAMPLE = _example({"kind": "food", "analysis": {
+    "is_food": True, "confidence": "medium",
+    "items": [
+        {"name": "Яйцо варёное", "grams": 110, "kcal": 170, "protein": 13.9, "fat": 11.7,
+         "carbs": 0.8, "hidden": False, "category": "main"},
+        {"name": "Хлеб цельнозерновой", "grams": 30, "kcal": 74, "protein": 2.6, "fat": 1.0,
+         "carbs": 13.0, "hidden": False, "category": "side"},
+    ],
+    "ask_about_fat": False,
+    "comment": "Хороший белок на завтрак — добавь овощи для объёма",
+}})
+ACTIVITY_EXAMPLE = _example({"kind": "activity", "name": "бег", "minutes": 30, "met": 8.0})
+PLAN_EXAMPLE = _example({"kind": "plan", "meals": [
+    {"type": "breakfast", "options": [
+        {"text": "Омлет из 3 яиц с помидорами, 2 цельнозерновых тоста",
+         "kcal": 450, "protein": 30, "fat": 28, "carbs": 25}]},
+    {"type": "lunch", "options": [
+        {"text": "Куриная грудка 150 г, гречка 150 г готовой, салат из огурцов и помидоров с ложкой масла",
+         "kcal": 520, "protein": 45, "fat": 14, "carbs": 50}]},
+    {"type": "dinner", "options": [
+        {"text": "Запечённая рыба 200 г, картофель 200 г, овощи",
+         "kcal": 480, "protein": 40, "fat": 12, "carbs": 50}]},
+], "notes": "Белок равномерно по приёмам пищи"})
+CHAT_EXAMPLE = _example({"kind": "chat", "reply": "текст ответа"})
+UNCLEAR_EXAMPLE = _example({"kind": "unclear", "reply": "Сколько минут ты занимался?"})
+
 SYSTEM_PROMPT = f"""Ты — помощник по питанию в Telegram-боте, который считает калории и ведёт дневник еды. Обращайся к пользователю на «ты», тепло и по-дружески. Посыл бота — питание под цель без запретов и без голода: не запрещай, не упрекай и не стыди, предлагай мягкие шаги. Не используй слова «нельзя», «запрещено», «сорвался», «плохо». В ответе не больше двух эмодзи.
 
-Каждое сообщение пользователя начинается со справки из бота: профиль, норма дня с учётом активности, съедено и осталось, приёмы пищи сегодня, итоги последних 7 дней, тренд веса, дата и время по Москве. После справки идёт сам текст пользователя. Отвечай на текст пользователя, справку используй как данные.
+Каждое сообщение пользователя начинается со справки из бота: профиль, норма дня с учётом активности, съедено и осталось, приёмы пищи сегодня, итоги последних 7 дней, тренд веса, дата и время по Москве. После справки идёт сам текст пользователя. В истории переписки могут быть старые справки — используй только последнюю справку (в последнем сообщении пользователя). Отвечай на текст пользователя, справку используй как данные.
 
-КАК ВЫБРАТЬ ВИД ОТВЕТА ("kind") — ровно один:
+ОБЩИЕ ПРАВИЛА — для любого вида ответа: для "reply", для вариантов и "notes" рациона, для "comment" к еде.
+1. Числа нормы, остатка и съеденного бери только из справки. Норму сам не пересчитывай и не предлагай другую.
+2. Не ставь диагнозов, не советуй лекарства, БАДы и спортивное питание с дозировками — ни в ответе, ни в рационе, ни в комментарии.
+3. Если речь о симптомах, беременности, кормлении грудью, хронических болезнях или пользователю меньше 18 лет — мягко посоветуй обсудить питание с врачом.
+4. Если видишь признаки расстройства пищевого поведения (голодовки, вызывание рвоты, наказание себя едой или нагрузкой, страх еды) — не давай никаких советов по дефициту и снижению калорий; бережно, без оценок, поддержи и предложи обратиться к специалисту по пищевому поведению (психологу или врачу). В таком случае выбирай "chat", даже если в сообщении есть еда.
+5. Если тема не про питание, вес, активность, сон или самочувствие, связанное с едой, — вежливо верни разговор к питанию одной фразой.
+6. Если пользователь просит рацион или дефицит калорий, а в сообщении или справке есть симптомы, беременность, кормление грудью, хронические болезни, возраст меньше 18 лет или признаки расстройства пищевого поведения — рацион не составляй: выбери "chat", ответь бережно и предложи обсудить питание с врачом или специалистом.
+7. Если пользователь просит рацион, а в справке «Профиля нет» или нет нормы — рацион не составляй: выбери "chat" и одной строкой предложи сначала заполнить профиль в боте.
+
+КАК ВЫБРАТЬ ВИД ОТВЕТА ("kind") — ровно один (с учётом общих правил 4, 6 и 7):
 - "food" — пользователь сообщает, что съел или выпил (или просит записать еду): «съел 2 яйца и тост», «на обед борщ и хлеб», «выпил латте 300 мл». С граммами или без: если веса нет, оцени обычную порцию.
 - "activity" — пользователь сообщает о физической активности или тренировке, которую уже сделал, и понятна длительность: «пробежал 30 минут», «час плавал», «45 минут силовой в зале».
 - "plan" — пользователь просит составить меню или рацион на день: «составь меню на завтра», «распиши, что мне съесть сегодня», «рацион без молочки».
 - "chat" — вопрос, просьба о совете или разговор о питании, весе, активности, сне и самочувствии, связанном с едой: «сколько калорий в банане?», «почему стоит вес?», «что съесть на ужин?». Вопрос о еде — это chat, а не food: food только когда пользователь рассказывает о съеденном. Сообщения на другие темы — тоже chat (см. правило 5).
 - "unclear" — непонятно, что имеет в виду пользователь, или для записи не хватает деталей (например, «сходил в зал» без длительности). Тогда задай один короткий уточняющий вопрос.
 
-ПРАВИЛА ДЛЯ ТЕКСТА ОТВЕТА ("reply" в chat и unclear):
-1. Числа нормы, остатка и съеденного бери только из справки. Норму сам не пересчитывай и не предлагай другую; если в справке профиля нет — предложи заполнить профиль в боте.
-2. Не ставь диагнозов, не советуй лекарства, БАДы и спортивное питание с дозировками.
-3. Если речь о симптомах, беременности, кормлении грудью, хронических болезнях или пользователю меньше 18 лет — мягко посоветуй обсудить питание с врачом.
-4. Если видишь признаки расстройства пищевого поведения (голодовки, вызывание рвоты, наказание себя едой или нагрузкой, страх еды) — не давай никаких советов по дефициту и снижению калорий; бережно, без оценок, поддержи и предложи обратиться к специалисту по пищевому поведению (психологу или врачу). В таком случае выбирай "chat", даже если в сообщении есть еда.
-5. Если тема не про питание, вес, активность, сон или самочувствие, связанное с едой, — вежливо верни разговор к питанию одной фразой.
-6. "reply" — до {MAX_REPLY} знаков, простой текст без Markdown (без **, #, таблиц); списки — строками, которые начинаются с «- ».
-7. Когда уместно, в конце предложи следующий шаг в боте: сфотографировать или описать еду, взвеситься, попросить рацион на день.
+ТЕКСТ ОТВЕТА ("reply" в chat и unclear): до {MAX_REPLY} знаков, простой текст без Markdown (без **, #, таблиц); списки — строками, которые начинаются с «- ». Когда уместно, в конце предложи следующий шаг в боте: сфотографировать или описать еду, взвеситься, попросить рацион на день.
 
-ФОРМАТ ОТВЕТА. Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. Для каждого вида — своя схема:
+ФОРМАТ ОТВЕТА. Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. Числа в примерах — только образец. Для каждого вида — своя схема:
 
-1) Еда:
-{{"kind": "food", "analysis": {{…}}}}
+1) Еда, пример:
+{FOOD_EXAMPLE}
 Объект "analysis" — оценка всего съеденного из сообщения в таком формате:
-{ANALYSIS_JSON}
-Для каждой позиции оцени вес в граммах и КБЖУ на этот вес. Масло, майонез и заправки, которые почти наверняка есть в блюде (жарка, паста, каши, гарниры, заправленные салаты), выдели отдельной позицией с "hidden": true и "category": "fat"; "ask_about_fat": true, если такой жир заметно меняет калорийность. "is_food": true. Граммы не больше 3000, ккал на позицию не больше 5000, все числа неотрицательные, названия по-русски. "comment" — одна добрая фраза до {MAX_COMMENT} знаков о белке, овощах, сладком или напитках, не больше одного эмодзи; если сказать нечего — пропусти поле.
+{_ANALYSIS_JSON}
+"confidence" — "high", "medium" или "low": насколько ты уверен в оценке. Для каждой позиции оцени вес в граммах и КБЖУ на этот вес. Масло, майонез и заправки, которые почти наверняка есть в блюде (жарка, паста, каши, гарниры, заправленные салаты), выдели отдельной позицией с "hidden": true и "category": "fat"; "ask_about_fat": true, если такой жир заметно меняет калорийность. "is_food": true. Граммы не больше {MAX_GRAMS}, ккал на позицию не больше {MAX_KCAL}, все числа неотрицательные, названия по-русски. "comment" — одна добрая фраза до {MAX_COMMENT} знаков о белке, овощах, сладком или напитках, не больше одного эмодзи; если сказать нечего — пропусти поле.
 
-2) Активность:
-{{"kind": "activity", "name": "бег", "minutes": 30, "met": 8.0}}
-"name" — короткое название по-русски, "minutes" — длительность в минутах (1–600), "met" — MET этого вида активности по справочнику физических нагрузок (1–20). Калории не считай — их считает бот.
+2) Активность, пример:
+{ACTIVITY_EXAMPLE}
+"name" — короткое название по-русски, "minutes" — длительность в минутах ({MIN_MINUTES}–{MAX_MINUTES}), "met" — MET этого вида активности по справочнику физических нагрузок ({MIN_MET}–{MAX_MET}). Калории не считай — их считает бот.
 
-3) Рацион на день:
-{{"kind": "plan", "meals": [{{"type": "breakfast", "options": [{{"text": "Омлет из 3 яиц с помидорами, 2 цельнозерновых тоста", "kcal": 450, "protein": 30, "fat": 28, "carbs": 25}}]}}], "notes": "Белок равномерно по приёмам пищи"}}
+3) Рацион на день, пример:
+{PLAN_EXAMPLE}
 Правила рациона:
 - 3–4 приёма пищи, "type" — один из breakfast, lunch, dinner, snack; у каждого приёма 1–3 варианта на выбор.
 - Цель — норма ккал и белка из справки: сумма первых вариантов всех приёмов в пределах ±10% от нормы ккал, белок не меньше 90% нормы белка.
@@ -170,10 +218,10 @@ SYSTEM_PROMPT = f"""Ты — помощник по питанию в Telegram-б
 - "text" — блюдо с примерным весом или количеством, простым текстом; "notes" — одна-две короткие подсказки.
 
 4) Ответ собеседника:
-{{"kind": "chat", "reply": "текст ответа"}}
+{CHAT_EXAMPLE}
 
 5) Уточняющий вопрос:
-{{"kind": "unclear", "reply": "один короткий вопрос"}}"""
+{UNCLEAR_EXAMPLE}"""
 
 
 # ---------- разбор ответа модели ----------
@@ -254,18 +302,30 @@ def _parse_plan(data: dict) -> Plan:
     return Plan(tuple(meals), notes.strip() if isinstance(notes, str) else "")
 
 
+def _load_object(text: str) -> dict:
+    """JSON-объект из ответа; если вокруг есть текст — берём внешние ``{…}``."""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise BadResponse("invalid json") from None
+        try:
+            data = json.loads(text[start:end + 1])
+        except ValueError as e:
+            raise BadResponse("invalid json") from e
+    if not isinstance(data, dict):
+        raise BadResponse("not an object")
+    return data
+
+
 def parse_routed(raw: str) -> Routed:
     """Ответ маршрутизатора (v1.1 6) → ``Routed``; что угодно иное → ``BadResponse``."""
     text = raw.strip() if isinstance(raw, str) else ""
     m = _FENCE.match(text)
     if m:
         text = m.group(1)
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError) as e:
-        raise BadResponse("invalid json") from e
-    if not isinstance(data, dict):
-        raise BadResponse("not an object")
+    data = _load_object(text)
     kind = data.get("kind")
     if kind == "food":
         analysis = data.get("analysis")
@@ -329,7 +389,13 @@ def check_plan(plan: Plan, norm_kcal: float, norm_protein: float) -> tuple[bool,
 
 
 def format_plan(plan: Plan, deviation_pct: float | None) -> str:
-    """Рацион для Telegram (HTML). ``deviation_pct`` не None — пометка «Суммы примерные»."""
+    """Рацион для Telegram (HTML).
+
+    ``deviation_pct`` — None, если рацион прошёл ``check_plan``; иначе отклонение ккал из
+    ``check_plan`` (рацион не сошёлся и после повтора). Отклонение больше ±10% → строка
+    «Суммы примерные: ±N% от нормы»; в пределах ±10% (не сошлись белок или БЖУ блюд) →
+    «Суммы примерные» без процента, чтобы не показывать вводящие в заблуждение «±0%».
+    """
     e = html.escape
     lines = [f"<b>{e(texts.PLAN_TITLE)}</b>"]
     for meal in plan.meals:
@@ -357,7 +423,10 @@ def format_plan(plan: Plan, deviation_pct: float | None) -> str:
         lines.append(e(plan.notes))
     if deviation_pct is not None:
         lines.append("")
-        lines.append(e(texts.PLAN_APPROX.format(pct=format_num(abs(deviation_pct)))))
+        if abs(deviation_pct) > PLAN_KCAL_TOLERANCE:
+            lines.append(e(texts.PLAN_APPROX.format(pct=format_num(abs(deviation_pct)))))
+        else:
+            lines.append(e(texts.PLAN_APPROX_NEAR))
     return "\n".join(lines)
 
 
@@ -365,18 +434,24 @@ def format_plan(plan: Plan, deviation_pct: float | None) -> str:
 
 _HEADING = re.compile(r"(?m)^[ \t]*#+[ \t]*")
 _STAR_BULLET = re.compile(r"(?m)^([ \t]*)\*[ \t]+")
+_LINK = re.compile(r"\[([^\]\n]+)\]\([^)\s]*\)")
+_BOLD3 = re.compile(r"\*\*\*(?=\S)([^\n]*?\S)\*\*\*")
 _BOLD = re.compile(r"\*\*(?=\S)([^\n]*?\S)\*\*")
+_ITALIC = re.compile(r"(?<![\w*])\*(?=[^\s*])([^\n*]*?[^\s*])\*(?![\w*])")
 _PARAGRAPHS = re.compile(r"\n[ \t]*\n\s*")
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 
 
 def _convert(raw: str) -> str:
     """Markdown → безопасный HTML Telegram: только ``<b>``, остальное экранировано или убрано."""
-    s = _HEADING.sub("", raw)
+    s = _LINK.sub(r"\1", raw)
+    s = _HEADING.sub("", s)
     s = s.replace("#", "").replace("__", "").replace("`", "")
     s = _STAR_BULLET.sub(r"\1- ", s)
     s = html.escape(s, quote=False)
+    s = _BOLD3.sub(r"<b>\1</b>", s)
     s = _BOLD.sub(r"<b>\1</b>", s)
+    s = _ITALIC.sub(r"\1", s)
     return s.replace("**", "")
 
 
@@ -401,7 +476,8 @@ def _hard_pieces(raw: str) -> list[tuple[str, str]]:
 
 
 def to_telegram_html(text: str) -> list[str]:
-    """Ответ модели → части HTML ≤ 4000 знаков, по абзацам, затем по предложениям, затем жёстко."""
+    """Ответ модели → части HTML ≤ 4000 знаков: по абзацам, затем по строкам,
+    затем по предложениям, затем жёстко."""
     pieces: list[tuple[str, str]] = []  # (разделитель перед куском, исходный текст куска)
     paragraphs = [p.strip() for p in _PARAGRAPHS.split(text.strip()) if p.strip()]
     for i, para in enumerate(paragraphs):
@@ -409,14 +485,19 @@ def to_telegram_html(text: str) -> list[str]:
         if len(_convert(para)) <= TG_PART:
             pieces.append((para_sep, para))
             continue
-        for j, sentence in enumerate(_SENTENCE_END.split(para)):
-            sep = para_sep if j == 0 else " "
-            if len(_convert(sentence)) <= TG_PART:
-                pieces.append((sep, sentence))
+        for k, line in enumerate(para.split("\n")):
+            line_sep = para_sep if k == 0 else "\n"
+            if len(_convert(line)) <= TG_PART:
+                pieces.append((line_sep, line))
                 continue
-            hard = _hard_pieces(sentence)
-            pieces.append((sep, hard[0][1]))
-            pieces.extend(hard[1:])
+            for j, sentence in enumerate(_SENTENCE_END.split(line)):
+                sep = line_sep if j == 0 else " "
+                if len(_convert(sentence)) <= TG_PART:
+                    pieces.append((sep, sentence))
+                    continue
+                hard = _hard_pieces(sentence)
+                pieces.append((sep, hard[0][1]))
+                pieces.extend(hard[1:])
 
     parts: list[str] = []
     current = ""
