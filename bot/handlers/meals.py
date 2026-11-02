@@ -108,6 +108,11 @@ def _render(
     return text, keyboards.meal_result(meal.meal_id, ask_fat=ask, topic=topic)
 
 
+def _note(meal: Meal) -> str | None:
+    """Строка под записью при перерисовке: комментарий к тарелке (сообщение о переборе не повторяем)."""
+    return meal.analysis.comment or None
+
+
 def _shown_topic(callback: CallbackQuery) -> int | None:
     """Тема с кнопки «💡» под сообщением, которое правится: при перерисовке кнопка остаётся."""
     msg = callback.message
@@ -194,11 +199,6 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
 
     if await state.get_state() in (MealEdit.correction.state, MealEdit.sauce.state):
         await state.clear()
-    # Единица лимита тратится до вызова модели; остальные фото альбома отсечены выше.
-    if not await take_ai(deps.storage, user_id, to_local(now).date(), deps.ai_limit):
-        log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
-        await message.answer(texts.AI_LIMIT)
-        return
 
     status = await message.answer(texts.ANALYZING)
     file_id = message.photo[-1].file_id if message.photo else message.document.file_id
@@ -213,6 +213,12 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
     except BadImage:
         log.warning("photo not an image", extra={"user_id": user_id, "error_kind": "bad_image"})
         await _edit_or_send(status, texts.NOT_FOOD, None)
+        return
+    # Единица лимита — только когда фото скачано и это картинка, до вызова модели;
+    # остальные фото альбома отсечены выше.
+    if not await take_ai(deps.storage, user_id, to_local(now).date(), deps.ai_limit):
+        log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
+        await _edit_or_send(status, texts.AI_LIMIT, None)
         return
     try:
         analysis = await _vision_call(deps.vision.analyze(jpeg, message.caption))
@@ -337,7 +343,7 @@ async def on_fat(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None
     await deps.storage.update_meal(meal)
     await callback.answer()
     remaining = await _remaining(deps, user, meal.local_date)
-    text, markup = _render(meal, remaining, None, topic=_shown_topic(callback))
+    text, markup = _render(meal, remaining, _note(meal), topic=_shown_topic(callback))
     await _edit_or_send(callback.message, text, markup)
 
 
@@ -393,7 +399,7 @@ async def on_type_chosen(callback: CallbackQuery, deps: Deps) -> None:
     await deps.storage.update_meal(meal)
     await callback.answer()
     remaining = await _remaining(deps, user, meal.local_date)
-    text, markup = _render(meal, remaining, None, topic=_shown_topic(callback))
+    text, markup = _render(meal, remaining, _note(meal), topic=_shown_topic(callback))
     await _edit_or_send(callback.message, text, markup)
 
 
@@ -419,9 +425,15 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
         return
     try:
         analysis = await _vision_call(deps.vision.correct(meal.analysis, text))
-    except VisionError:
-        log.warning("vision unavailable", extra={"user_id": user_id, "error_kind": "vision_unavailable"})
+    except VisionError as e:
+        no_credits = isinstance(e, VisionUnavailable) and e.no_credits
+        log.warning(
+            "vision unavailable",
+            extra={"user_id": user_id, "error_kind": "no_credits" if no_credits else "vision_unavailable"},
+        )
         await message.answer(texts.OVERLOADED)
+        if no_credits:
+            await _alert_no_credits(message.bot, deps)
         return
     if not _is_food(analysis):
         await message.answer(texts.CORRECTION_NOT_FOOD)
@@ -430,7 +442,7 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
     if current == MealEdit.sauce.state:
         meal.fat_answer = "sauce"
     await deps.storage.update_meal(meal)
-    out, markup = _render(meal, await _remaining(deps, user, meal.local_date), None)
+    out, markup = _render(meal, await _remaining(deps, user, meal.local_date), _note(meal))
     await message.answer(out, reply_markup=markup)
 
 

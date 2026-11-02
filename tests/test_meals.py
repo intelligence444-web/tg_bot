@@ -573,3 +573,93 @@ async def test_type_menu_on_inaccessible_message_sends_new(bot_env):
     await dp.feed_update(bot, _inaccessible_callback(f"meal:type:{meal.meal_id}"))
     sends = session.of_type(SendMessage)
     assert len(sends) == 1 and f"mt:{meal.meal_id}:dinner" in _callbacks(sends[0].reply_markup)
+
+
+# --- финальное ревью v1.1: комментарий при перерисовке, лимит после скачивания, no_credits в правке ---
+
+
+def _with_comment(a: Analysis, comment: str = "Добавь овощей") -> Analysis:
+    return Analysis(a.is_food, a.confidence, a.items, a.ask_about_fat, comment=comment)
+
+
+def _ai_used(deps) -> int:
+    return deps.storage._ai_usage.get((1, TODAY), 0)
+
+
+async def test_comment_kept_after_fat_answer(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [_with_comment(pasta(ask=True))])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, make_callback(f"fat:{meal.meal_id}:little"))
+    assert "Добавь овощей" in session.texts()[-1]
+
+
+async def test_comment_kept_after_type_change_and_correction(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [_with_comment(pasta()), _with_comment(buckwheat(), "Хороший выбор")])
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, make_callback(f"mt:{meal.meal_id}:dinner"))
+    assert "Добавь овощей" in session.texts()[-1]
+    await dp.feed_update(bot, make_callback(f"meal:edit:{meal.meal_id}"))
+    await dp.feed_update(bot, make_message("это гречка"))
+    assert "Хороший выбор" in session.texts()[-1]
+
+
+async def test_overeat_note_not_repeated_on_rerender(bot_env):
+    meal_a = Analysis(True, "high", big(3000).items, True, comment="Отличный обед")
+    dp, bot, session, deps = await _setup(bot_env, [meal_a])
+    await dp.feed_update(bot, make_message(photo=True))
+    assert texts.OVEREAT in session.texts()[-1]
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, make_callback(f"fat:{meal.meal_id}:none"))
+    out = session.texts()[-1]
+    assert texts.OVEREAT not in out and "Отличный обед" in out
+
+
+async def test_failed_download_spends_no_ai_unit(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+
+    async def fetch_photo(_bot, file_id):
+        raise OSError("net")
+
+    deps.fetch_photo = fetch_photo
+    await dp.feed_update(bot, make_message(photo=True))
+    assert session.texts()[-1] == texts.OVERLOADED
+    assert _ai_used(deps) == 0
+
+
+async def test_non_image_spends_no_ai_unit(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+
+    async def fetch_photo(_bot, file_id):
+        return b"not an image"
+
+    deps.fetch_photo = fetch_photo
+    await dp.feed_update(bot, make_message(photo=True))
+    assert any("Не вижу еды" in t for t in session.texts())
+    assert _ai_used(deps) == 0
+
+
+async def test_photo_spends_one_unit_after_download(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta()])
+    deps.ai_limit = 0
+    await dp.feed_update(bot, make_message(photo=True))
+    assert deps.vision.calls == []
+    assert session.texts()[-1] == texts.AI_LIMIT
+    assert _ai_used(deps) == 1
+
+
+async def test_correction_no_credits_alerts_admin(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta(), VisionUnavailable("x", no_credits=True)])
+    deps.admin_chat_id = 777
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    await dp.feed_update(bot, make_callback(f"meal:edit:{meal.meal_id}"))
+    session.clear()
+    await dp.feed_update(bot, make_message("это гречка"))
+    assert texts.OVERLOADED in session.texts()
+    admin = [r for r in session.of_type(SendMessage) if r.chat_id == 777]
+    assert len(admin) == 1 and admin[0].text == texts.ADMIN_KIE_NO_CREDITS
