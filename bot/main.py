@@ -1,7 +1,8 @@
 """Функция bot: вебхук Telegram через API Gateway (спец. 3, 13, 17).
 
 Переменные окружения: BOT_TOKEN, KIE_API_KEY, WEBHOOK_SECRET, ADMIN_CHAT_ID (необязательна),
-YDB_ENDPOINT, YDB_DATABASE, VISION_PRIMARY, VISION_FALLBACK (необязательна); PRIVACY_URL читает
+YDB_ENDPOINT, YDB_DATABASE, VISION_PRIMARY, VISION_FALLBACK (необязательна), CHAT_PRIMARY, CHAT_FALLBACK
+(необязательны, по умолчанию VISION_*), AI_DAILY_LIMIT (необязательна, 50); PRIVACY_URL читает
 ``bot.texts`` (обязательна: без неё ``_init_runtime`` падает с ошибкой в логе),
 YDB_METADATA_CREDENTIALS — ``bot.ydb_storage``.
 """
@@ -94,6 +95,27 @@ def parse_admin_chat_id(raw: str | None) -> int | None:
         return None
 
 
+DEFAULT_AI_LIMIT = 50
+
+
+def parse_ai_limit(raw: str | None) -> int:
+    """AI_DAILY_LIMIT: пусто — 50; не число или меньше 1 — ошибка в логе и тоже 50."""
+    value = (raw or "").strip()
+    if not value:
+        return DEFAULT_AI_LIMIT
+    try:
+        limit = int(value)
+        if limit < 1:
+            raise ValueError(value)
+    except ValueError:
+        log.error(
+            "config: AI_DAILY_LIMIT is not a positive number, using %d", DEFAULT_AI_LIMIT,
+            extra={"user_id": None, "error_kind": "config"},
+        )
+        return DEFAULT_AI_LIMIT
+    return limit
+
+
 def _check_config() -> None:
     """Обязательные настройки, без которых бот работал бы неправильно, а не падал."""
     from bot import texts  # noqa: PLC0415
@@ -125,6 +147,7 @@ async def _close_runtime(rt: dict[str, Any]) -> None:
     closers = (
         ("bot", lambda: rt["bot"].session.close()),
         ("http", lambda: rt["http"].aclose()),
+        ("iam_http", lambda: rt["iam_http"].aclose()),
         ("pool", lambda: ydb_storage.close(rt["pool"])),
     )
     for name, close in closers:
@@ -143,10 +166,13 @@ async def _init_runtime() -> dict[str, Any]:
 
     from bot import ydb_storage  # noqa: PLC0415
     from bot.app import Deps, build_dispatcher  # noqa: PLC0415
+    from bot.speech import YandexSpeech, metadata_token_provider  # noqa: PLC0415
     from bot.vision import build_vision  # noqa: PLC0415
 
     bot = Bot(token=os.environ["BOT_TOKEN"])
     http = httpx.AsyncClient(timeout=VISION_TIMEOUT_S)
+    # Метаданные — обычный http на локальный адрес: прокси из окружения ему мешает.
+    iam_http = httpx.AsyncClient(trust_env=False, timeout=5)
     pool = await ydb_storage.connect(os.environ["YDB_ENDPOINT"], os.environ["YDB_DATABASE"])
     storage = ydb_storage.YdbStorage(pool)
     vision = build_vision(
@@ -155,6 +181,13 @@ async def _init_runtime() -> dict[str, Any]:
         os.environ["KIE_API_KEY"],
         http,
     )
+    chat = build_vision(
+        os.environ.get("CHAT_PRIMARY") or os.environ["VISION_PRIMARY"],
+        os.environ.get("CHAT_FALLBACK") or os.environ.get("VISION_FALLBACK") or None,
+        os.environ["KIE_API_KEY"],
+        http,
+    )
+    speech = YandexSpeech(http, metadata_token_provider(iam_http))
 
     async def fetch_photo(bot: Bot, file_id: str) -> bytes:
         buf = await bot.download(file_id)
@@ -167,6 +200,9 @@ async def _init_runtime() -> dict[str, Any]:
         clock=lambda: datetime.now(timezone.utc),
         admin_chat_id=parse_admin_chat_id(os.environ.get("ADMIN_CHAT_ID")),
         rng=random.Random(),
+        speech=speech,
+        chat=chat,
+        ai_limit=parse_ai_limit(os.environ.get("AI_DAILY_LIMIT")),
     )
     dp = build_dispatcher(deps, ydb_storage.YdbFsmStorage(pool))
     return {
@@ -176,6 +212,7 @@ async def _init_runtime() -> dict[str, Any]:
         "storage": storage,
         "pool": pool,
         "http": http,
+        "iam_http": iam_http,
         "secret": os.environ["WEBHOOK_SECRET"],
     }
 

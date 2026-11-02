@@ -66,7 +66,10 @@ def test_env_example_lists_every_env_var_read_by_code():
     for path in ("bot/main.py", "bot/daily.py", "bot/texts.py", "bot/ydb_storage.py"):
         src = (ROOT / path).read_text(encoding="utf-8")
         names |= set(re.findall(r"os\.environ(?:\.get\()?\[?\(?[\"']([A-Z_]+)[\"']", src))
-    assert {"BOT_TOKEN", "WEBHOOK_SECRET", "YDB_ENDPOINT", "VISION_PRIMARY"} <= names
+    assert {
+        "BOT_TOKEN", "WEBHOOK_SECRET", "YDB_ENDPOINT", "VISION_PRIMARY",
+        "CHAT_PRIMARY", "CHAT_FALLBACK", "AI_DAILY_LIMIT", "KIE_API_KEY",
+    } <= names
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     declared = dict(re.findall(r"^([A-Z_]+)=(.*)$", example, re.M))
     assert names <= set(declared), names - set(declared)
@@ -151,3 +154,30 @@ def test_build_zip_includes_index_shim():
     script = (ROOT / "scripts" / "build_zip.sh").read_text(encoding="utf-8")
     assert "dist/bot.zip index.py bot requirements.txt" in script
     assert "`index.py`" in DEPLOY and "bot.main.handler" not in DEPLOY and "bot.daily.handler" not in DEPLOY
+
+
+def test_deploy_md_mentions_speechkit_role_and_new_vars():
+    assert "ai.speechkit-stt.user" in DEPLOY
+    for name in ("AI_DAILY_LIMIT", "CHAT_PRIMARY", "CHAT_FALLBACK"):
+        assert name in DEPLOY, name
+    daily_step = DEPLOY.split("## Шаг 7.")[1].split("## Шаг 8.")[0]
+    assert "KIE_API_KEY" in daily_step and "VISION_PRIMARY" in daily_step
+    assert "по понедельникам" in daily_step
+    checklist = DEPLOY.split("## Шаг 11.")[1].split("## Шаг 12.")[0]
+    for needle in ("Еда текстом", "Голос", "Вопрос", "Рацион", "Шаги"):
+        assert needle in checklist, needle
+
+
+def test_help_and_readme_describe_v11():
+    from bot import texts
+
+    assert "муж, 1987, 180, 87" in texts.HELP
+    for needle in ("текстом", "голос", "рацион", "шаг", "отчёт", "/stop_tips"):
+        assert needle in texts.HELP, needle
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "муж, 1987, 180, 87" in readme and "AI_DAILY_LIMIT" in readme
+
+
+def test_spec_lists_report_date_user_fields():
+    spec = (ROOT / "docs/superpowers/specs/2026-10-24-v1.1-ai-assistant-design.md").read_text(encoding="utf-8")
+    assert "`last_report_date`" in spec and "`last_weigh_reminder_date`" in spec

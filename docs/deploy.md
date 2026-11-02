@@ -14,8 +14,9 @@
 
 ```
 Пользователь → Telegram → API Gateway → функция bot ─┬─→ база YDB
-                                                     └─→ Kie.ai (распознавание фото)
-Таймер (каждый день в 09:00 МСК) → функция daily → база YDB → Telegram
+                                                     ├─→ Kie.ai (фото, вопросы, рацион)
+                                                     └─→ Yandex SpeechKit (голосовые)
+Таймер (каждый день в 09:00 МСК) → функция daily → база YDB, Kie.ai → Telegram
 ```
 
 ---
@@ -51,6 +52,11 @@
    (см. шаг 13), используйте:
    - `VISION_PRIMARY` = `openai:gemini-3-pro`
    - `VISION_FALLBACK` = `openai:gemini-2.5-pro`
+7. **Необязательно: `CHAT_PRIMARY`, `CHAT_FALLBACK`, `AI_DAILY_LIMIT`.** `CHAT_PRIMARY` и
+   `CHAT_FALLBACK` — модели ИИ-помощника (вопросы, рацион, совет в недельном отчёте) в том же
+   формате; если не заданы, берутся `VISION_PRIMARY` и `VISION_FALLBACK`. `AI_DAILY_LIMIT` —
+   сколько запросов к ИИ в день может сделать один пользователь (по умолчанию 50; если
+   значение не число, бот запишет в лог ошибку `config` и будет считать 50).
 
 ---
 
@@ -82,10 +88,11 @@ yc config set folder-name calorie-bot
    (или в левом меню **«Все сервисы» → «Identity and Access Management»**).
 2. Слева выберите **«Сервисные аккаунты»** → **«Создать сервисный аккаунт»**.
 3. Имя: `bot-sa`.
-4. Нажмите **«Добавить роль»** и добавьте по очереди три роли:
+4. Нажмите **«Добавить роль»** и добавьте по очереди четыре роли:
    - `ydb.editor`
    - `functions.functionInvoker`
    - `serverless.functions.invoker`
+   - `ai.speechkit-stt.user` (распознавание голосовых сообщений в Yandex SpeechKit)
 5. Нажмите **«Создать»**.
 6. Откройте созданный аккаунт `bot-sa` и запишите в заметку его **Идентификатор**
    (строка вида `aje...`) — это `ID_СЕРВИСНОГО_АККАУНТА`.
@@ -94,7 +101,7 @@ yc config set folder-name calorie-bot
 yc iam service-account create --name bot-sa
 FOLDER_ID=$(yc resource-manager folder get calorie-bot --format json | jq -r .id)
 SA_ID=$(yc iam service-account get bot-sa --format json | jq -r .id)
-for ROLE in ydb.editor functions.functionInvoker serverless.functions.invoker; do
+for ROLE in ydb.editor functions.functionInvoker serverless.functions.invoker ai.speechkit-stt.user; do
   yc resource-manager folder add-access-binding "$FOLDER_ID" --role "$ROLE" --subject "serviceAccount:$SA_ID"
 done
 ```
@@ -304,6 +311,10 @@ ALTER TABLE `users` ADD COLUMN last_weigh_reminder_date Date;
    | `YDB_DATABASE` | из шага 3 |
    | `YDB_METADATA_CREDENTIALS` | `1` |
 
+   Необязательные переменные: `AI_DAILY_LIMIT` (запросов к ИИ в день на пользователя, по
+   умолчанию `50`), `CHAT_PRIMARY` и `CHAT_FALLBACK` (модели помощника; без них берутся
+   `VISION_PRIMARY` и `VISION_FALLBACK`).
+
 8. Нажмите **«Сохранить изменения»** и дождитесь, пока версия соберётся (статус «Активна»;
    первая сборка может занять пару минут, потому что ставятся библиотеки).
    Если сборка упала, ошибка будет видна там же — пришлите её текст разработчику.
@@ -321,7 +332,7 @@ yc serverless function version create \
   --execution-timeout 120s \
   --service-account-id "$SA_ID" \
   --source-path dist/bot.zip \
-  --environment BOT_TOKEN=...,KIE_API_KEY=...,WEBHOOK_SECRET=...,ADMIN_CHAT_ID=...,PRIVACY_URL=...,VISION_PRIMARY=openai:gemini-3-pro,VISION_FALLBACK=openai:gemini-2.5-pro,YDB_ENDPOINT=...,YDB_DATABASE=...,YDB_METADATA_CREDENTIALS=1
+  --environment BOT_TOKEN=...,KIE_API_KEY=...,WEBHOOK_SECRET=...,ADMIN_CHAT_ID=...,PRIVACY_URL=...,VISION_PRIMARY=openai:gemini-3-pro,VISION_FALLBACK=openai:gemini-2.5-pro,AI_DAILY_LIMIT=50,YDB_ENDPOINT=...,YDB_DATABASE=...,YDB_METADATA_CREDENTIALS=1
 ```
 
 ---
@@ -339,9 +350,16 @@ yc serverless function version create \
    | Ключ | Значение |
    |---|---|
    | `BOT_TOKEN` | из шага 0 |
+   | `KIE_API_KEY` | из шага 0 (для совета в недельном отчёте) |
+   | `VISION_PRIMARY` | `openai:gemini-3-pro` |
    | `YDB_ENDPOINT` | из шага 3 |
    | `YDB_DATABASE` | из шага 3 |
    | `YDB_METADATA_CREDENTIALS` | `1` |
+
+   Необязательно: `VISION_FALLBACK`, `CHAT_PRIMARY`, `CHAT_FALLBACK` (как у функции `bot`).
+   Без `KIE_API_KEY` или модели недельный отчёт уходит без совета (в логе предупреждение
+   `config`). Функция `daily` теперь отправляет что-либо только по понедельникам: напоминание о
+   взвешивании и недельный отчёт; в остальные дни она сразу завершается.
 
 6. **«Сохранить изменения»**.
 
@@ -355,7 +373,7 @@ yc serverless function version create \
   --execution-timeout 600s \
   --service-account-id "$SA_ID" \
   --source-path dist/bot.zip \
-  --environment BOT_TOKEN=...,YDB_ENDPOINT=...,YDB_DATABASE=...,YDB_METADATA_CREDENTIALS=1
+  --environment BOT_TOKEN=...,KIE_API_KEY=...,VISION_PRIMARY=openai:gemini-3-pro,YDB_ENDPOINT=...,YDB_DATABASE=...,YDB_METADATA_CREDENTIALS=1
 ```
 
 ---
@@ -429,8 +447,9 @@ yc serverless api-gateway create --name bot-gateway --spec docs/api-gateway.yaml
 
 ## Шаг 10. Таймер для ежедневных рассылок
 
-Каждый день в 06:00 UTC (= 09:00 по Москве) таймер запускает функцию `daily`:
-напоминание о взвешивании по понедельникам.
+Каждый день в 06:00 UTC (= 09:00 по Москве) таймер запускает функцию `daily`. Рассылает она
+только по понедельникам: напоминание о взвешивании и недельный отчёт с советом; в остальные
+дни ничего не отправляет.
 
 1. **Cloud Functions** → слева **«Триггеры»** → **«Создать триггер»**.
 2. Имя: `daily-timer`. Тип: **«Таймер»**.
@@ -458,7 +477,14 @@ yc serverless trigger create timer \
       10–20 секунд: функция «просыпается»).
 - [ ] Кнопка **«📅 Сегодня»** (дневник) — приём пищи виден, итоги дня посчитаны.
 - [ ] Взвешивание — кнопка **«⚖️ Взвеситься»**, ввели вес, бот принял его и показал прогресс.
-- [ ] В понедельник в 09:00 по Москве пришло напоминание о взвешивании (если за неделю не было взвешиваний).
+- [ ] Еда текстом — написали «гречка 150 г с курицей», бот посчитал и записал приём пищи.
+- [ ] Голос — отправили голосовое «съел яблоко», бот распознал речь и записал еду
+      (если пишет, что не расслышал, проверьте роль `ai.speechkit-stt.user` у `bot-sa`).
+- [ ] Вопрос — спросили «сколько белка мне нужно?», бот ответил по вашей норме.
+- [ ] Рацион — написали «составь рацион на день», бот прислал завтрак, обед, перекус и ужин.
+- [ ] Шаги — написали «прошёл 8000 шагов», бот записал активность и добавил ккал к норме дня.
+- [ ] В понедельник в 09:00 по Москве пришло напоминание о взвешивании (если за неделю не было взвешиваний)
+      и недельный отчёт (если за неделю есть записи еды минимум за 3 дня).
 
 Если бот молчит: проверьте `getWebhookInfo` (шаг 9) и логи (шаг 12).
 
@@ -498,6 +524,10 @@ yc serverless function version create --function-name bot --runtime python312 \
 Формат значения: `openai:<модель>` (например, `openai:gemini-3-pro`, `openai:gemini-2.5-pro`)
 или `claude:<идентификатор модели Claude из документации Kie>`. `VISION_FALLBACK` можно
 оставить пустым — тогда запасной модели нет.
+
+**Модели помощника и лимит ИИ.** `CHAT_PRIMARY` / `CHAT_FALLBACK` (вопросы, рацион; в функции
+`daily` — совет недельного отчёта) и `AI_DAILY_LIMIT` меняются так же, в переменных окружения.
+Если `CHAT_*` не заданы, используются `VISION_*`.
 
 **Пополнить Kie.** Личный кабинет [kie.ai](https://kie.ai) → раздел пополнения баланса.
 Если кредиты закончились, бот сообщит об этом в чат администратора (`ADMIN_CHAT_ID`),
@@ -541,7 +571,9 @@ KIE_API_KEY=... python scripts/eval_vision.py photos/ --models openai:gemini-3-p
 | `BOT_TOKEN` | @BotFather | функции `bot`, `daily`; ссылка вебхука |
 | `ADMIN_CHAT_ID` | @userinfobot | функция `bot` |
 | `WEBHOOK_SECRET` | придумать | функция `bot`; ссылка вебхука |
-| `KIE_API_KEY` | kie.ai → API Key | функция `bot` |
+| `KIE_API_KEY` | kie.ai → API Key | функции `bot`, `daily` |
+| `VISION_PRIMARY`, `VISION_FALLBACK` | шаг 0 | функция `bot`; `daily` (для совета) |
+| `CHAT_PRIMARY`, `CHAT_FALLBACK`, `AI_DAILY_LIMIT` | необязательно, шаг 0 | функция `bot` (`CHAT_*` и в `daily`) |
 | `PRIVACY_URL` | адрес privacy.html на лендинге | функция `bot` |
 | `YDB_ENDPOINT`, `YDB_DATABASE` | база YDB → «Обзор» | функции `bot`, `daily` |
 | `ID_СЕРВИСНОГО_АККАУНТА` | IAM → `bot-sa` | спецификация API Gateway |

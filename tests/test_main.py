@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 
 from PIL import Image
 
-from bot.main import process_webhook
+from bot.main import parse_ai_limit, process_webhook
 from bot.models import Analysis, FoodItem
 from tests.fakes import FakeVision, make_message, onboard
 
@@ -110,3 +110,13 @@ async def test_handler_exception_is_logged_and_200(bot_env, caplog):
 def test_event_body_roundtrip_is_json():
     upd = make_message("/start")
     assert json.loads(_event(upd)["body"])["update_id"] == upd.update_id
+
+
+def test_parse_ai_limit(caplog):
+    assert parse_ai_limit(None) == 50 and parse_ai_limit("") == 50
+    assert parse_ai_limit(" 20 ") == 20
+    with caplog.at_level(logging.ERROR, logger="bot.main"):
+        assert parse_ai_limit("x") == 50
+        assert parse_ai_limit("0") == 50
+    records = [r for r in caplog.records if r.name == "bot.main"]
+    assert len(records) == 2 and all(r.error_kind == "config" for r in records)
