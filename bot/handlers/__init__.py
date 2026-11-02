@@ -3,14 +3,14 @@
 Все роутеры работают только в личных чатах: сообщения из групп молча пропускаются.
 
 Порядок важен: ``start`` (команды и согласие) → ``consent_gate`` (всё остальное без согласия)
-→ ``meal_edit_escape`` (кнопка меню или команда закрывает правку записи) → ``commands`` (/stop_tips, /start_tips, «❓ Помощь» — в любом состоянии) → ``onboarding`` (шаги профиля по состояниям) → сценарии (``weight``, ``meals``, ``diary``, ``activity``, ``profile``) → ``text`` (маршрутизатор текста вне состояний: профиль, вес, ИИ) → ``fallback``.
+→ ``meal_edit_escape`` (кнопка меню или команда закрывает правку записи) → ``commands`` (/stop_tips, /start_tips, «❓ Помощь» — в любом состоянии) → ``onboarding`` (шаги профиля по состояниям) → сценарии (``weight``, ``meals``, ``diary``, ``activity``, ``profile``) → ``voice`` (голос → текст) → ``text`` (маршрутизатор текста вне состояний: профиль, вес, ИИ) → ``fallback``.
 Новые роутеры добавляются в ``_feature_routers`` — ``fallback`` всегда последний.
 """
 from __future__ import annotations
 
 from aiogram import F, Router
 
-from bot.handlers import activity, diary, fallback, meals, onboarding, profile, start, text, weight
+from bot.handlers import activity, diary, fallback, meals, onboarding, profile, start, text, voice, weight
 
 
 def _feature_routers() -> list[Router]:
@@ -23,6 +23,7 @@ def _feature_routers() -> list[Router]:
         diary.build_router(),
         activity.build_router(),
         profile.build_router(),
+        voice.build_router(),
         text.build_router(),
     ]
 

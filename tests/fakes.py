@@ -23,6 +23,9 @@ from aiogram.types import (
     Message,
     PhotoSize,
     Update,
+    Voice,
+    VideoNote,
+    Audio,
 )
 from aiogram.types import User as TgUser
 
@@ -199,10 +202,14 @@ def make_message(
     media_group_id: str | None = None,
     user_id: int = 1,
     caption: str | None = None,
+    voice: int | None = None,
+    video_note: bool = False,
+    audio: bool = False,
 ) -> Update:
     """Апдейт с входящим сообщением в личке ``user_id``.
 
-    ``photo`` — file_id (или True); ``document`` — mime-type документа (``"image/jpeg"``).
+    ``photo`` — file_id (или True); ``document`` — mime-type документа (``"image/jpeg"``);
+    ``voice`` — длительность голосового в секундах; ``video_note``/``audio`` — кружок/аудиофайл.
     """
     fields: dict[str, Any] = {
         "message_id": next(_incoming_ids),
@@ -224,6 +231,12 @@ def make_message(
         fields["document"] = Document(
             file_id="doc-file", file_unique_id="doc-u", mime_type=document, file_name=f"file.{ext}"
         )
+    if voice is not None:
+        fields["voice"] = Voice(file_id="voice-file", file_unique_id="voice-u", duration=voice)
+    if video_note:
+        fields["video_note"] = VideoNote(file_id="vn-file", file_unique_id="vn-u", length=240, duration=5)
+    if audio:
+        fields["audio"] = Audio(file_id="audio-file", file_unique_id="audio-u", duration=60)
     return Update(update_id=next(_update_ids), message=Message(**fields))
 
 
