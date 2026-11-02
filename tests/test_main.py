@@ -120,3 +120,88 @@ def test_parse_ai_limit(caplog):
         assert parse_ai_limit("0") == 50
     records = [r for r in caplog.records if r.name == "bot.main"]
     assert len(records) == 2 and all(r.error_kind == "config" for r in records)
+
+
+# --- сборка рантайма ---
+
+
+def _runtime_env(monkeypatch, **extra):
+    import bot.texts as texts
+    from bot import ydb_storage
+
+    base = {
+        "BOT_TOKEN": "123456:ABCdef", "KIE_API_KEY": "k", "WEBHOOK_SECRET": SECRET,
+        "YDB_ENDPOINT": "e", "YDB_DATABASE": "d", "VISION_PRIMARY": "openai:vp",
+    }
+    for key in ("VISION_FALLBACK", "CHAT_PRIMARY", "CHAT_FALLBACK", "AI_DAILY_LIMIT"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in {**base, **extra}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(texts, "PRIVACY_URL", "https://x.test/privacy")
+    closed = []
+
+    async def connect(endpoint, database):
+        return object()
+
+    async def close(pool):
+        closed.append("pool")
+
+    monkeypatch.setattr(ydb_storage, "connect", connect)
+    monkeypatch.setattr(ydb_storage, "close", close)
+    return closed
+
+
+async def test_init_runtime_wires_speech_chat_limit_and_closes(monkeypatch):
+    from bot import main
+    from bot.speech import YandexSpeech
+    from bot.vision import FallbackVision
+
+    closed = _runtime_env(
+        monkeypatch, CHAT_PRIMARY="openai:cp", CHAT_FALLBACK="openai:cf", AI_DAILY_LIMIT="7"
+    )
+    rt = await main._init_runtime()
+    try:
+        deps = rt["dp"]["deps"]
+        assert isinstance(deps.speech, YandexSpeech)
+        assert isinstance(deps.chat, FallbackVision) and deps.chat is not deps.vision
+        assert deps.ai_limit == 7
+        assert rt["iam_http"] is not rt["http"]
+        assert deps.speech._http is rt["http"]
+    finally:
+        await main._close_runtime(rt)
+    assert rt["iam_http"].is_closed and rt["http"].is_closed
+    assert closed == ["pool"]
+
+
+async def test_init_runtime_chat_defaults_to_vision_models(monkeypatch):
+    from bot import main
+    import bot.vision as vision
+
+    seen = []
+    real = vision.build_vision
+
+    def spy(primary, fallback, key, http):
+        seen.append((primary, fallback))
+        return real(primary, fallback, key, http)
+
+    _runtime_env(monkeypatch, VISION_FALLBACK="openai:vf")
+    monkeypatch.setattr(vision, "build_vision", spy)
+    rt = await main._init_runtime()
+    try:
+        assert seen == [("openai:vp", "openai:vf")] * 2
+        assert rt["dp"]["deps"].ai_limit == 50
+    finally:
+        await main._close_runtime(rt)
+
+
+async def test_init_runtime_bad_chat_spec_does_not_stop_bot(monkeypatch, caplog):
+    from bot import main
+
+    _runtime_env(monkeypatch, CHAT_PRIMARY="nonsense")
+    with caplog.at_level(logging.ERROR, logger="bot.main"):
+        rt = await main._init_runtime()
+    try:
+        assert rt["dp"]["deps"].chat is None
+        assert any(getattr(r, "error_kind", None) == "config" for r in caplog.records)
+    finally:
+        await main._close_runtime(rt)

@@ -181,12 +181,16 @@ async def _init_runtime() -> dict[str, Any]:
         os.environ["KIE_API_KEY"],
         http,
     )
-    chat = build_vision(
-        os.environ.get("CHAT_PRIMARY") or os.environ["VISION_PRIMARY"],
-        os.environ.get("CHAT_FALLBACK") or os.environ.get("VISION_FALLBACK") or None,
-        os.environ["KIE_API_KEY"],
-        http,
-    )
+    try:
+        chat = build_vision(
+            os.environ.get("CHAT_PRIMARY") or os.environ["VISION_PRIMARY"],
+            os.environ.get("CHAT_FALLBACK") or os.environ.get("VISION_FALLBACK") or None,
+            os.environ["KIE_API_KEY"],
+            http,
+        )
+    except ValueError:  # опечатка в CHAT_*: бот работает, помощник берёт клиент ``vision``
+        log.error("config: bad CHAT_PRIMARY/CHAT_FALLBACK, using vision", extra={"user_id": None, "error_kind": "config"})
+        chat = None
     speech = YandexSpeech(http, metadata_token_provider(iam_http))
 
     async def fetch_photo(bot: Bot, file_id: str) -> bytes:
