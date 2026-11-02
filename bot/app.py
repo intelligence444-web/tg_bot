@@ -12,6 +12,7 @@ from aiogram.fsm.storage.base import BaseStorage
 from aiogram.types import TelegramObject
 
 from bot.handlers import build_router
+from bot.speech import SpeechClient
 from bot.storage import Storage
 from bot.vision import VisionClient
 
@@ -24,6 +25,7 @@ class Deps:
     clock: Callable[[], datetime]  # aware UTC
     admin_chat_id: int | None
     rng: random.Random
+    speech: SpeechClient | None = None
 
 
 class ReactivateMiddleware(BaseMiddleware):

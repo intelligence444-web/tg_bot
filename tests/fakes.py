@@ -66,6 +66,21 @@ class FakeVision:
         return r
 
 
+class FakeSpeech:
+    """Отдаёт заранее заданные результаты по очереди и запоминает размеры аудио."""
+
+    def __init__(self, results: list[str | Exception]):
+        self._results = list(results)
+        self.calls: list[bytes] = []
+
+    async def recognize(self, ogg_opus: bytes) -> str:
+        self.calls.append(ogg_opus)
+        r = self._results.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
 # --- Telegram: подменная сессия aiogram, часы и конструкторы апдейтов ---
 
 BOT_ID = 42
