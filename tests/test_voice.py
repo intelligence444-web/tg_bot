@@ -1,10 +1,14 @@
 """Голосовые сообщения (v1.1): SpeechKit → handle_text."""
 from __future__ import annotations
 
+from aiogram.exceptions import TelegramAPIError
+from aiogram.methods import GetFile
+
 from bot import texts
-from bot.speech import SpeechError
-from tests.fakes import FakeSpeech, FakeVision, fsm_context, make_message, onboard
 from bot.handlers.meals import MealEdit
+from bot.handlers.weight import WeightInput
+from bot.speech import SpeechError
+from tests.fakes import FakeSpeech, FakeVision, fsm_context, get_fsm_state, make_message, onboard
 from tests.test_text import EGGS, TODAY, chat_json, food_json
 
 
@@ -46,7 +50,7 @@ async def test_31s_voice_too_long_no_speechkit(bot_env):
     speech = FakeSpeech(["x"])
     dp, bot, session, deps = await _setup(bot_env, speech)
     await dp.feed_update(bot, make_message(voice=31))
-    assert session.texts() == [texts.VOICE_TOO_LONG]
+    assert session.texts() == [texts.VOICE_TOO_LONG] == ["Скажи покороче — до 30 секунд"]
     assert speech.calls == []
     assert await _ai_used(deps) == 0
 
@@ -54,21 +58,21 @@ async def test_31s_voice_too_long_no_speechkit(bot_env):
 async def test_empty_recognition(bot_env):
     dp, bot, session, deps = await _setup(bot_env, FakeSpeech(["  "]))
     await dp.feed_update(bot, make_message(voice=5))
-    assert session.texts() == [texts.VOICE_EMPTY]
+    assert session.texts() == [texts.VOICE_EMPTY] == ["Не расслышал, попробуй ещё раз или напиши текстом"]
     assert await _ai_used(deps) == 0
 
 
 async def test_speech_error(bot_env):
     dp, bot, session, deps = await _setup(bot_env, FakeSpeech([SpeechError("boom")]))
     await dp.feed_update(bot, make_message(voice=5))
-    assert session.texts() == [texts.VOICE_FAILED]
+    assert session.texts() == [texts.VOICE_FAILED] == ["Не получилось распознать голос, напиши текстом"]
     assert await _ai_used(deps) == 0
 
 
 async def test_no_speech_configured(bot_env):
     dp, bot, session, deps = await _setup(bot_env, None)
     await dp.feed_update(bot, make_message(voice=5))
-    assert session.texts() == [texts.VOICE_FAILED]
+    assert session.texts() == [texts.VOICE_FAILED] == ["Не получилось распознать голос, напиши текстом"]
 
 
 async def test_video_note_and_audio(bot_env):
@@ -76,7 +80,8 @@ async def test_video_note_and_audio(bot_env):
     dp, bot, session, deps = await _setup(bot_env, speech)
     await dp.feed_update(bot, make_message(video_note=True))
     await dp.feed_update(bot, make_message(audio=True))
-    assert session.texts() == [texts.VOICE_ONLY, texts.VOICE_ONLY]
+    assert session.texts() == [texts.VOICE_ONLY] * 2
+    assert texts.VOICE_ONLY == "Пришли голосовое или напиши текстом"
     assert speech.calls == []
 
 
@@ -97,3 +102,29 @@ async def test_voice_in_fsm_state_asks_text(bot_env):
     await dp.feed_update(bot, make_message(voice=5))
     assert session.texts() == [texts.VOICE_IN_STATE]
     assert speech.calls == []
+
+
+async def test_download_failure_gives_voice_failed(bot_env):
+    for exc in (TelegramAPIError(GetFile(file_id="x"), "boom"), OSError("net")):
+        speech = FakeSpeech(["x"])
+        dp, bot, session, deps = await _setup(bot_env, speech)
+
+        async def broken(_bot, _file_id, exc=exc):
+            raise exc
+
+        deps.fetch_photo = broken
+        await dp.feed_update(bot, make_message(voice=5))
+        assert session.texts() == [texts.VOICE_FAILED]
+        assert speech.calls == []
+        assert await _ai_used(deps) == 0
+
+
+async def test_voice_in_weight_input_clears_state_and_is_processed_as_text(bot_env):
+    # как и текст: выход из ввода веса сбрасывает состояние и сообщение идёт дальше
+    speech = FakeSpeech(["привет"])
+    dp, bot, session, deps = await _setup(bot_env, speech, [chat_json("Привет!")])
+    await fsm_context(dp).set_state(WeightInput.value)
+    await dp.feed_update(bot, make_message(voice=3))
+    assert await get_fsm_state(dp) is None
+    assert len(speech.calls) == 1
+    assert session.texts()[-1].startswith("🎙 Понял так: привет")
