@@ -21,6 +21,8 @@ from bot.progress import trend_weight
 if TYPE_CHECKING:
     from bot.app import Deps
 
+MAX_ACTIVITY_NAME = 60  # знаков в названии тренировки от модели
+
 
 def _has_norm(user: User) -> bool:
     return user.profile is not None and user.norm is not None
@@ -95,7 +97,7 @@ async def record_training(
         return
     day = to_local(deps.clock()).date()
     burned = training_kcal(met, minutes, await _weight(deps, user, day))
-    name = name or texts.TRAINING_NAME
+    name = (name or texts.TRAINING_NAME)[:MAX_ACTIVITY_NAME].strip()
     head = texts.TRAINING_HEAD.format(name=name[:1].upper() + name[1:], minutes=format_num(minutes))
     await _record(message, deps, user, day, name, burned, head, prefix)
 

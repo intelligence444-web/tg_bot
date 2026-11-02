@@ -172,3 +172,19 @@ async def test_weekly_advice_strips_json_like_wrappers():
 
 def test_week_start_sanity():
     assert WEEK_START.weekday() == 0 and WEEK_START + timedelta(days=7) == MON
+
+
+def test_advice_prompt_minor_and_eating_disorder_rule():
+    from bot.weekly import ADVICE_SYSTEM
+
+    assert "меньше 18 лет" in ADVICE_SYSTEM
+    assert "признаки расстройства пищевого поведения" in ADVICE_SYSTEM
+    line = next(s for s in ADVICE_SYSTEM.split(". ") if "меньше 18 лет" in s)
+    assert "дефицит" in line and "снижени" in line
+
+
+async def test_advice_request_has_age():
+    chat = FakeVision([], texts=["Совет"])
+    stats = WeekStats(5, 1800.0, 90.0, 3, 0.0, None, 5, 1900.0)
+    await weekly_advice(chat, stats, PROFILE)
+    assert "Возраст: 30." in chat.completions[0]["messages"][-1]["content"]

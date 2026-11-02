@@ -161,3 +161,12 @@ async def test_context_norm_includes_credit(bot_env):
     user = await deps.storage.get_user(1)
     ctx = await build_day_context(deps, user, deps.clock())
     assert ctx.norm_kcal == norm + 210
+
+
+async def test_long_activity_name_capped(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [run_json(name="очень " * 40 + "долгий бег")])
+    await dp.feed_update(bot, make_message("пробежал полчаса"))
+    acts = await deps.storage.activities_on(1, TODAY)
+    assert len(acts) == 1 and len(acts[0].name) <= 60
+    assert acts[0].name == ("очень " * 40)[:60].strip()
+    assert "Очень очень" in session.last_message().text
