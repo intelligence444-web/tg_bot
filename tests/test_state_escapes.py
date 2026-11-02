@@ -75,28 +75,36 @@ async def test_repeat_profile_activity_step_weigh_button_leaves_it(bot_env):
     assert session.texts()[-1] == texts.ASK_WEIGHING
 
 
-async def test_first_profile_keeps_menu_button_inside(bot_env):
+async def test_first_profile_menu_button_leaves_it(bot_env):
     dp, bot, session, deps = bot_env
     await dp.feed_update(bot, make_message("/start"))
     await dp.feed_update(bot, make_callback("consent"))
     await dp.feed_update(bot, make_message("жен, 30, 165, 70"))
     session.clear()
     await dp.feed_update(bot, make_message(texts.BTN_TODAY))
-    assert await get_fsm_state(dp) == ProfileFlow.confirm.state
-    assert session.texts()[-1].startswith(texts.USE_BUTTONS)
+    assert await get_fsm_state(dp) is None
+    assert session.texts()[-1].startswith("📅 Сегодня")
+    assert texts.PROFILE_HINT in session.texts()[-1]
 
 
-async def test_first_profile_photo_reasks(bot_env):
+async def test_first_profile_photo_is_recorded(bot_env):
     dp, bot, session, deps = bot_env
     deps.vision = FakeVision([_food()])
+
+    async def fetch_photo(_bot, file_id):
+        return _jpeg()
+
+    deps.fetch_photo = fetch_photo
     for upd in (make_message("/start"), make_callback("consent"), make_message("жен, 30, 165, 70"),
                 make_callback("pf:yes")):
         await dp.feed_update(bot, upd)
     session.clear()
     await dp.feed_update(bot, make_message(photo=True))
-    assert await get_fsm_state(dp) == ProfileFlow.activity.state
-    assert session.texts()[-1].startswith(texts.USE_BUTTONS)
-    assert deps.vision.calls == []
+    assert await get_fsm_state(dp) is None
+    assert len(await deps.storage.meals_on(1, TODAY)) == 1
+    assert "✅ Записал в дневник" in session.texts()[-1]
+    assert texts.PROFILE_HINT in session.texts()[-1]
+    assert (await deps.storage.get_user(1)).profile is None
 
 
 # --- I5b: правка записи ---

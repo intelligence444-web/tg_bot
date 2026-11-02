@@ -303,6 +303,27 @@ async def test_new_line_at_confirm_replaces_data(bot_env):
     assert await get_fsm_state(dp) == ProfileFlow.confirm.state
 
 
+async def test_new_line_at_any_step_restarts_confirm(bot_env):
+    dp, bot, session, deps = bot_env
+    await _to_step(dp, bot)
+    await dp.feed_update(bot, make_message("жен, 30, 165, 72"))
+    assert session.last_message().text == "Женщина, 30 лет, 165 см, 72 кг — верно?"
+    assert await get_fsm_state(dp) == ProfileFlow.confirm.state
+
+    await _feed(dp, bot, make_callback("pf:yes"), make_callback("act:moderate"), make_callback("goal:lose"))
+    await dp.feed_update(bot, make_message("муж, 40, 180, 90"))
+    assert session.last_message().text == "Мужчина, 40 лет, 180 см, 90 кг — верно?"
+    assert await get_fsm_state(dp) == ProfileFlow.confirm.state
+    assert (await deps.storage.get_user(1)).profile is None
+
+    # Обычное число на шаге желаемого веса — по-прежнему желаемый вес.
+    await _feed(dp, bot, make_callback("pf:yes"), make_callback("act:moderate"), make_callback("goal:lose"))
+    await dp.feed_update(bot, make_message("80"))
+    user = await deps.storage.get_user(1)
+    assert user.profile.sex == "male" and user.profile.target_weight_kg == 80
+    assert await get_fsm_state(dp) is None
+
+
 async def test_maintain_skips_target_step(bot_env):
     dp, bot, session, deps = bot_env
     await onboard(dp, bot, goal="maintain", target=None)

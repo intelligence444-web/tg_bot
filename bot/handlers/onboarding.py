@@ -266,6 +266,8 @@ def _number(message: Message, bounds: tuple[float, float]) -> float | None:
 
 
 async def on_target(message: Message, state: FSMContext, deps: Deps) -> None:
+    if message.text and await handle_profile_text(message, state, deps):
+        return  # новая строка профиля — подтверждение заново
     value = _number(message, WEIGHT_RANGE)
     if value is None:
         await message.answer(texts.BAD_TARGET)
@@ -313,18 +315,15 @@ def _is_escape(message: Message) -> bool:
     return doc is not None and (doc.mime_type or "").startswith("image/")
 
 
-async def stay_in_profile_flow(message: Message, state: FSMContext, raw_state: str | None, deps: Deps) -> bool:
-    """Фильтр роутера. У кого профиль уже есть (повторная строка, «Изменить цель»), кнопка меню
-    или фото сбрасывают шаги, и сообщение уходит к следующим роутерам — как ``leave_weight_input``.
+async def stay_in_profile_flow(message: Message, state: FSMContext, raw_state: str | None) -> bool:
+    """Фильтр роутера. Кнопка меню или фото сбрасывают шаги профиля у любого пользователя, и
+    сообщение уходит к следующим роутерам — как ``leave_weight_input``: еда записывается и до
+    профиля (v1.1 3, п. 2), меню работает.
 
     Фильтр стоит на уровне роутера, а не обработчика: ``raw_state`` в данных апдейта не меняется
     после ``state.clear()``, и шаги ниже в том же роутере всё равно поймали бы сообщение.
-    Первый расчёт (профиля ещё нет) так не покинуть: вопрос повторяется.
     """
     if raw_state not in ProfileFlow or not _is_escape(message):
-        return True
-    user = await deps.storage.get_user(message.from_user.id)
-    if user is None or user.profile is None:
         return True
     await state.clear()
     return False
