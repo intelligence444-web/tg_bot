@@ -238,7 +238,8 @@ CREATE TABLE IF NOT EXISTS `ai_usage` (
     local_date Date NOT NULL,
     count Int32,
     PRIMARY KEY (user_id, local_date)
-);
+)
+WITH (TTL = Interval("P30D") ON local_date);
 ```
 
 В свежей таблице `users` уже есть колонка `transition_from_kcal` (плавный выход на
@@ -519,6 +520,72 @@ yc serverless function version create --function-name bot --runtime python312 \
   --service-account-id "$SA_ID" --source-path dist/bot.zip \
   --environment ...   # те же переменные, что в шаге 6
 ```
+
+### Переход на версию 1.1 (если бот уже был запущен)
+
+Если бот версии 1.0 уже работает, сделайте всё по порядку, ничего не пропуская.
+
+**1. Новые таблицы.** База `calorie-bot-db` → вкладка **«Навигация»** → **«Новый SQL-запрос»** →
+вставьте текст ниже целиком → **«Выполнить»**. Появятся таблицы `chat_messages`, `activities`,
+`ai_usage`; старые таблицы и данные не меняются.
+
+```sql
+CREATE TABLE IF NOT EXISTS `chat_messages` (
+    user_id Int64 NOT NULL,
+    created_at Timestamp NOT NULL,
+    role Utf8,
+    text Utf8,
+    PRIMARY KEY (user_id, created_at)
+)
+WITH (TTL = Interval("P7D") ON created_at);
+
+CREATE TABLE IF NOT EXISTS `activities` (
+    user_id Int64 NOT NULL,
+    activity_id Utf8 NOT NULL,
+    local_date Date,
+    name Utf8,
+    kcal_burned Double,
+    kcal_credit Double,
+    created_at Timestamp,
+    PRIMARY KEY (user_id, activity_id)
+);
+
+CREATE TABLE IF NOT EXISTS `ai_usage` (
+    user_id Int64 NOT NULL,
+    local_date Date NOT NULL,
+    count Int32,
+    PRIMARY KEY (user_id, local_date)
+)
+WITH (TTL = Interval("P30D") ON local_date);
+```
+
+**2. Новые колонки в `users`.** Там же, в новом SQL-запросе, выполните строки ниже **по одной**
+(вставили одну строку → «Выполнить» → следующая). Ошибка «already exists» значит, что колонка
+уже есть: эту строку пропустите.
+
+```sql
+ALTER TABLE `users` ADD COLUMN first_seen_at Timestamp;
+ALTER TABLE `users` ADD COLUMN next_topic Int32;
+ALTER TABLE `users` ADD COLUMN last_topic_offer_date Date;
+ALTER TABLE `users` ADD COLUMN last_profile_hint_date Date;
+ALTER TABLE `users` ADD COLUMN last_report_date Date;
+ALTER TABLE `users` ADD COLUMN last_weigh_reminder_date Date;
+```
+
+**3. Роль для голосовых.** **Identity and Access Management** → **«Сервисные аккаунты»** →
+`bot-sa` → добавьте роль `ai.speechkit-stt.user` (как в шаге 2). Без неё бот отвечает на
+голосовые «Не получилось распознать голос».
+
+```
+yc resource-manager folder add-access-binding "$FOLDER_ID" --role ai.speechkit-stt.user --subject "serviceAccount:$SA_ID"
+```
+
+**4. Новые переменные (по желанию).** В функции `bot` можно добавить `AI_DAILY_LIMIT`,
+`CHAT_PRIMARY`, `CHAT_FALLBACK` (шаг 6). В функцию `daily` добавьте `KIE_API_KEY` и
+`VISION_PRIMARY` (шаг 7) — без них недельный отчёт придёт без совета.
+
+**5. Новый код.** Соберите новый `bot.zip` (шаг 5) и загрузите его в функцию `bot`, затем в
+функцию `daily`, как описано выше в «Новый код». Вебхук и таймер не меняются.
 
 **Сменить модель распознавания (VISION_PRIMARY / VISION_FALLBACK).** Функция `bot` →
 **«Редактор»** → в переменных окружения поменяйте значение → **«Сохранить изменения»**.

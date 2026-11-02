@@ -181,3 +181,23 @@ def test_help_and_readme_describe_v11():
 def test_spec_lists_report_date_user_fields():
     spec = (ROOT / "docs/superpowers/specs/2026-10-24-v1.1-ai-assistant-design.md").read_text(encoding="utf-8")
     assert "`last_report_date`" in spec and "`last_weigh_reminder_date`" in spec
+
+
+def test_deploy_md_v11_upgrade_block():
+    title = "Переход на версию 1.1 (если бот уже был запущен)"
+    step13 = DEPLOY.split("## Шаг 13.")[1].split("## Сколько это стоит")[0]
+    assert title in step13
+    block = step13.split(title)[1]
+    new_tables = [q for q in table_ddl() if any(f"`{t}`" in q for t in ("chat_messages", "activities", "ai_usage"))]
+    assert len(new_tables) == 3
+    for q in new_tables:
+        assert q in block
+    alter = "\n".join(users_alter_ddl())
+    assert alter in block
+    role = block.index("ai.speechkit-stt.user")
+    env = block.index("AI_DAILY_LIMIT")
+    upload = block.index("bot.zip")
+    # порядок: таблицы → ALTER → роль → переменные → архив в функции bot и daily
+    assert block.index(new_tables[0]) < block.index(alter) < role < env < upload
+    tail = block[upload:]
+    assert "`bot`" in tail and "`daily`" in tail

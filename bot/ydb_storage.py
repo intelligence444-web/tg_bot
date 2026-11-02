@@ -117,6 +117,7 @@ _TABLES: dict[str, tuple[dict[str, T], tuple[str, ...]]] = {
 _TTL = {
     "processed_updates": 'WITH (TTL = Interval("P1D") ON created_at)',
     "chat_messages": 'WITH (TTL = Interval("P7D") ON created_at)',
+    "ai_usage": 'WITH (TTL = Interval("P30D") ON local_date)',
 }
 
 
@@ -247,6 +248,7 @@ def _analysis_to_json(a: Analysis) -> dict[str, Any]:
         "confidence": a.confidence,
         "ask_about_fat": a.ask_about_fat,
         "items": [dataclasses.asdict(i) for i in a.items],
+        "comment": a.comment,
     }
 
 
@@ -256,6 +258,7 @@ def _analysis_from_json(d: Mapping[str, Any]) -> Analysis:
         confidence=d["confidence"],
         items=tuple(FoodItem(**i) for i in d["items"]),
         ask_about_fat=d["ask_about_fat"],
+        comment=d.get("comment", ""),  # записи до v1.1 — без комментария
     )
 
 

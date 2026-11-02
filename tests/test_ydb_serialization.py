@@ -229,3 +229,23 @@ def test_free_chat_timestamp():
     assert free_chat_timestamp(t, [t + us, t, t + 3 * us]) == t + 2 * us
     # Наивные значения из базы — UTC.
     assert free_chat_timestamp(t, [t.replace(tzinfo=None)]) == t + us
+
+
+def test_meal_roundtrip_keeps_comment():
+    meal = make_meal("c", 8)
+    meal.analysis = Analysis(True, "high", meal.analysis.items, True, comment="Добавь овощей")
+    assert meal_from_row(meal_to_row(meal)) == meal
+    back = meal_from_row(_as_db(meal_to_row(meal)))
+    assert back.analysis.comment == "Добавь овощей"
+
+
+def test_meal_without_comment_in_old_json():
+    row = _as_db(meal_to_row(make_meal("old", 8)))
+    row["analysis"].pop("comment", None)
+    assert meal_from_row(row).analysis.comment == ""
+
+
+def test_ai_usage_ttl_30_days():
+    ai = next(q for q in create_tables_queries("t1_") if "`t1_ai_usage`" in q)
+    assert ai.endswith('WITH (TTL = Interval("P30D") ON local_date);')
+    assert "local_date Date NOT NULL" in ai
