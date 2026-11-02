@@ -1,4 +1,4 @@
-"""Функция daily (таймер 09:00 МСК): курс «Знание дня» и напоминание о взвешивании (спец. 9.3, 11)."""
+"""Функция daily (таймер 09:00 МСК): напоминание о взвешивании (спец. 9.3, 11)."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,7 @@ from typing import Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 
-from bot import course, texts
+from bot import texts
 from bot.diary import to_local
 from bot.models import User
 from bot.storage import Storage
@@ -55,14 +55,6 @@ async def _process(storage: Storage, bot: Bot, user_id: int, today: date, counts
     try:
         if user is None:
             return
-        day = user.course_day + 1
-        card = course.card_for(day)
-        if card is not None and user.onboarded_at is not None and user.onboarded_at < today:
-            if await _send(bot, user, course.format_card(day, card), parse_mode="HTML"):
-                user = await storage.get_user(user_id) or user
-                user.course_day = day
-                await storage.save_user(user)
-                counts["cards"] += 1
         if today.weekday() == MONDAY:
             weighings = await storage.weights(user_id)
             if not weighings or weighings[-1].day < today - WEIGH_STALE:
@@ -80,7 +72,7 @@ async def _process(storage: Storage, bot: Bot, user_id: int, today: date, counts
 
 async def run_daily(storage: Storage, bot: Bot, now: datetime) -> dict[str, int]:
     today = to_local(now).date()
-    counts = {"cards": 0, "reminders": 0, "deactivated": 0}
+    counts = {"reminders": 0, "deactivated": 0}
     for candidate in await storage.daily_users():
         uid = candidate.user_id
         try:

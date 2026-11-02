@@ -88,3 +88,8 @@ def format_day(summary: DaySummary, norm: Norm, streak_days: int) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def overeat_now(day_kcal_before: float, meal_kcal: float, norm_kcal: float, already_today: bool) -> bool:
+    """Этот приём пищи впервые за день переводит сумму через норму."""
+    return day_kcal_before <= norm_kcal < day_kcal_before + meal_kcal and not already_today

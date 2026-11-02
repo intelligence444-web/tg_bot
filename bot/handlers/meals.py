@@ -23,10 +23,9 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMark
 
 from bot import keyboards, texts
 from bot.calc import effective_norm, format_num
-from bot.diary import meal_type_for, to_local
+from bot.diary import meal_type_for, overeat_now, to_local
 from bot.handlers.onboarding import start_onboarding
 from bot.models import Analysis, Meal, MealType, User
-from bot.tips import Tip, choose_tip
 from bot.vision import BadImage, VisionError, VisionUnavailable, prepare_image
 
 if TYPE_CHECKING:
@@ -51,7 +50,7 @@ class MealEdit(StatesGroup):
 # --- форматирование ---
 
 
-def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, tip: Tip | None) -> str:
+def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, note: str | None) -> str:
     lines = []
     for i in analysis.items[:MAX_SHOWN_ITEMS]:
         name = i.name if len(i.name) <= MAX_NAME_LEN else i.name[: MAX_NAME_LEN - 1] + "…"
@@ -77,14 +76,14 @@ def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, tip: 
         texts.MEAL_SAVED.format(meal_type=texts.MEAL_TYPE_NAMES[meal_type], kcal=format_num(analysis.kcal))
     )
     lines.append(texts.MEAL_LEFT.format(left=format_num(max(0.0, remaining))))
-    if tip is not None:
+    if note is not None:
         lines.append("")
-        lines.append(tip.text)
+        lines.append(note)
     return "\n".join(lines)
 
 
-def _render(meal: Meal, remaining: float, tip: Tip | None) -> tuple[str, InlineKeyboardMarkup]:
-    text = format_meal(meal.analysis, meal.meal_type, remaining, tip)
+def _render(meal: Meal, remaining: float, note: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    text = format_meal(meal.analysis, meal.meal_type, remaining, note)
     ask = meal.analysis.ask_about_fat
     if ask:
         text += f"\n\n{texts.ASK_FAT}"
@@ -191,7 +190,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         await _edit_or_send(status, texts.NOT_FOOD, None)
         return
     # Распознавание идёт до полутора минут: за это время пользователь мог измениться
-    # (/stop_tips, рассылка курса), поэтому пишем поверх свежей записи, а не старой.
+    # (/stop_tips), поэтому пишем поверх свежей записи, а не старой.
     user = await deps.storage.get_user(user_id)
     if user is None or user.norm is None:
         await _edit_or_send(status, texts.NEED_ONBOARDING, None)
@@ -204,15 +203,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
     before = await deps.storage.meals_on(user_id, today)
     day_before = sum(m.analysis.kcal for m in before)
     norm_kcal = effective_norm(user, today).kcal
-    tip = choose_tip(
-        analysis,
-        meal_type,
-        day_before,
-        norm_kcal,
-        user.last_overeat_date == today,
-        user.last_tip_variants,
-        deps.rng,
-    )
+    overeat = overeat_now(day_before, analysis.kcal, norm_kcal, user.last_overeat_date == today)
     meal = Meal(
         user_id=user_id,
         meal_id=uuid4().hex,
@@ -222,14 +213,11 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         analysis=analysis,
     )
     await deps.storage.add_meal(meal)
-    if tip is not None:
-        if tip.rule == "overeat":
-            user.last_overeat_date = today
-        else:
-            user.last_tip_variants[tip.rule] = tip.variant
+    if overeat:
+        user.last_overeat_date = today
         await deps.storage.save_user(user)
 
-    text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, tip)
+    text, markup = _render(meal, norm_kcal - day_before - analysis.kcal, texts.OVEREAT if overeat else None)
     await _edit_or_send(status, text, markup)
 
 

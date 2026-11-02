@@ -4,7 +4,7 @@ import pytest
 
 from bot import texts
 from bot.calc import Profile, calculate_norm
-from bot.diary import DaySummary, format_day, meal_type_for, summarize, to_local
+from bot.diary import DaySummary, format_day, meal_type_for, overeat_now, summarize, to_local
 from bot.models import Analysis, FoodItem, Meal
 
 NORM = calculate_norm(Profile("female", 30, 165, 70, "moderate", "lose", 62))
@@ -89,3 +89,11 @@ def test_streak_word_forms():
     assert "21 день подряд" in format_day(ref_summary(), NORM, 21)
     assert texts.plural(11, "день", "дня", "дней") == "дней"
     assert texts.plural(112, "день", "дня", "дней") == "дней"
+
+
+def test_overeat_now():
+    assert overeat_now(1500, 300, 1500, False) is True  # ровно норма до приёма
+    assert overeat_now(1200, 300, 1500, False) is False  # ровно до нормы, не больше
+    assert overeat_now(1200, 400, 1500, False) is True
+    assert overeat_now(1200, 400, 1500, True) is False  # уже было сегодня
+    assert overeat_now(1600, 300, 1500, False) is False  # норма превышена до приёма

@@ -1,7 +1,6 @@
-"""Ежедневные рассылки: курс «Знание дня», напоминание о взвешивании, /stop_tips (спец. 9.3, 11, 13)."""
+"""Ежедневные рассылки: напоминание о взвешивании, /stop_tips (спец. 9.3, 11, 13)."""
 from __future__ import annotations
 
-import re
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -9,7 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.methods import SendMessage
 
-from bot import course, texts
+from bot import texts
 from bot.daily import run_daily
 from bot.models import User
 from bot.storage import MemoryStorage
@@ -49,51 +48,18 @@ def _forbidden() -> TelegramForbiddenError:
     return TelegramForbiddenError(method=SendMessage(chat_id=1, text="x"), message="Forbidden: bot was blocked by the user")
 
 
-# --- курс ---
+# --- курса больше нет ---
 
 
-async def test_card_not_sent_on_onboarding_day_then_sent_next_day(env):
+async def test_no_course_cards(env):
     storage, bot, session = env
-    await storage.save_user(_user(onboarded=SAT))
-    await storage.upsert_weight(1, SAT, 70.0)
-
-    counts = await run_daily(storage, bot, at_9_msk(SAT))
-    assert counts == {"cards": 0, "reminders": 0, "deactivated": 0}
+    tue = MON + timedelta(days=1)
+    await storage.save_user(_user(onboarded=tue - timedelta(days=3)))
+    await storage.upsert_weight(1, tue - timedelta(days=1), 70.0)
+    counts = await run_daily(storage, bot, at_9_msk(tue))
+    assert counts == {"reminders": 0, "deactivated": 0}
     assert _sent(session) == []
     assert (await storage.get_user(1)).course_day == 0
-
-    counts = await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=1)))
-    assert counts["cards"] == 1
-    [msg] = _sent(session)
-    assert msg.chat_id == 1
-    assert msg.parse_mode == "HTML"
-    card = course.card_for(1)
-    assert msg.text == course.format_card(1, card)
-    assert msg.text.startswith("📚 Знание дня · 1/30\n\n<b>")
-    assert (await storage.get_user(1)).course_day == 1
-
-
-async def test_course_day_grows_each_day(env):
-    storage, bot, session = env
-    await storage.save_user(_user(onboarded=SAT))
-    await storage.upsert_weight(1, SAT, 70.0)
-    for i in range(1, 3):
-        await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=i)))
-        assert (await storage.get_user(1)).course_day == i
-    assert [m.text for m in _sent(session)] == [course.format_card(i, course.card_for(i)) for i in (1, 2)]
-
-
-async def test_nothing_after_last_existing_card(env):
-    storage, bot, session = env
-    last = len(course.CARDS)
-    await storage.save_user(_user(onboarded=SAT, course_day=last))
-    await storage.upsert_weight(1, SAT, 70.0)
-    counts = await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=1)))
-    assert counts["cards"] == 0
-    assert _sent(session) == []
-    assert (await storage.get_user(1)).course_day == last
-    assert course.card_for(last + 1) is None
-    assert course.card_for(0) is None
 
 
 # --- напоминание о взвешивании ---
@@ -101,17 +67,17 @@ async def test_nothing_after_last_existing_card(env):
 
 async def test_monday_reminder_when_last_weighing_8_days_ago(env):
     storage, bot, session = env
-    await storage.save_user(_user(onboarded=MON - timedelta(days=20), course_day=len(course.CARDS)))
+    await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     await storage.upsert_weight(1, MON - timedelta(days=8), 70.0)
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"cards": 0, "reminders": 1, "deactivated": 0}
+    assert counts == {"reminders": 1, "deactivated": 0}
     assert [m.text for m in _sent(session)] == [texts.WEIGH_REMINDER]
 
 
 @pytest.mark.parametrize("days_ago", [3, 7])
 async def test_no_monday_reminder_when_weighed_recently(env, days_ago):
     storage, bot, session = env
-    await storage.save_user(_user(onboarded=MON - timedelta(days=20), course_day=len(course.CARDS)))
+    await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     await storage.upsert_weight(1, MON - timedelta(days=days_ago), 70.0)
     counts = await run_daily(storage, bot, at_9_msk(MON))
     assert counts["reminders"] == 0
@@ -121,7 +87,7 @@ async def test_no_monday_reminder_when_weighed_recently(env, days_ago):
 async def test_no_reminder_when_not_monday(env):
     storage, bot, session = env
     tue = MON + timedelta(days=1)
-    await storage.save_user(_user(onboarded=MON - timedelta(days=20), course_day=len(course.CARDS)))
+    await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     await storage.upsert_weight(1, tue - timedelta(days=30), 70.0)
     counts = await run_daily(storage, bot, at_9_msk(tue))
     assert counts["reminders"] == 0
@@ -130,26 +96,26 @@ async def test_no_reminder_when_not_monday(env):
 
 async def test_monday_is_by_moscow_date(env):
     storage, bot, session = env
-    await storage.save_user(_user(onboarded=MON - timedelta(days=20), course_day=len(course.CARDS)))
+    await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     await storage.upsert_weight(1, MON - timedelta(days=10), 70.0)
     # воскресенье 22:00 UTC — уже понедельник 01:00 по Москве
     counts = await run_daily(storage, bot, datetime(2026, 10, 25, 22, 0, tzinfo=timezone.utc))
     assert counts["reminders"] == 1
 
 
-async def test_card_and_reminder_on_monday(env):
+async def test_monday_reminder_without_weighings(env):
     storage, bot, session = env
     await storage.save_user(_user(onboarded=MON - timedelta(days=20)))
     counts = await run_daily(storage, bot, at_9_msk(MON))  # взвешиваний нет вовсе
-    assert counts == {"cards": 1, "reminders": 1, "deactivated": 0}
-    assert [m.text for m in _sent(session)] == [course.format_card(1, course.card_for(1)), texts.WEIGH_REMINDER]
+    assert counts == {"reminders": 1, "deactivated": 0}
+    assert [m.text for m in _sent(session)] == [texts.WEIGH_REMINDER]
 
 
 async def test_tips_disabled_gets_nothing(env):
     storage, bot, session = env
     await storage.save_user(_user(onboarded=MON - timedelta(days=20), tips_enabled=False))
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"cards": 0, "reminders": 0, "deactivated": 0}
+    assert counts == {"reminders": 0, "deactivated": 0}
     assert _sent(session) == []
     assert (await storage.get_user(1)).course_day == 0
 
@@ -165,26 +131,23 @@ async def test_forbidden_deactivates_and_next_run_skips(env):
     counts = await run_daily(storage, bot, at_9_msk(MON))
     assert counts["deactivated"] == 1
     u1, u2 = await storage.get_user(1), await storage.get_user(2)
-    assert u1.is_active is False and u1.course_day == 0
-    assert u2.is_active is True and u2.course_day == 1
-    assert counts["cards"] == 1 and counts["reminders"] == 1  # только второму
+    assert u1.is_active is False
+    assert u2.is_active is True
+    assert counts["reminders"] == 1  # только второму
 
     session.clear()
-    await run_daily(storage, bot, at_9_msk(MON + timedelta(days=1)))
+    await run_daily(storage, bot, at_9_msk(MON + timedelta(days=7)))
     assert {m.chat_id for m in _sent(session)} == {2}
 
 
 async def test_other_telegram_error_does_not_stop_run(env):
     storage, bot, session = env
-    await storage.save_user(_user(1, onboarded=SAT))
-    await storage.save_user(_user(2, onboarded=SAT))
-    await storage.upsert_weight(1, SAT, 70.0)
-    await storage.upsert_weight(2, SAT, 70.0)
+    old = MON - timedelta(days=20)
+    await storage.save_user(_user(1, onboarded=old))
+    await storage.save_user(_user(2, onboarded=old))
     session.fail(SendMessage, TelegramBadRequest(method=SendMessage(chat_id=1, text="x"), message="Bad"), times=1)
-    counts = await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=1)))
-    assert counts == {"cards": 1, "reminders": 0, "deactivated": 0}
-    days = sorted([(await storage.get_user(i)).course_day for i in (1, 2)])
-    assert days == [0, 1]
+    counts = await run_daily(storage, bot, at_9_msk(MON))
+    assert counts == {"reminders": 1, "deactivated": 0}
     assert [(await storage.get_user(i)).is_active for i in (1, 2)] == [True, True]
 
 
@@ -269,39 +232,6 @@ async def test_commands_before_consent_hit_consent_gate(bot_env):
     assert (await deps.storage.get_user(1)).tips_enabled is True
 
 
-# --- карточки ---
-
-_BANNED = re.compile(r"нельзя|запрещ|сорвал|плохо", re.IGNORECASE)
-_EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
-
-
-def test_cards_valid():
-    assert course.CARDS, "нужна хотя бы одна карточка"
-    assert len(course.CARDS) <= course.COURSE_LENGTH == 30
-    for n, card in enumerate(course.CARDS, start=1):
-        assert card.title.strip(), n
-        assert card.body.strip() and card.tip.strip(), n
-        assert len(card.body) + len(card.tip) <= 600, n
-        for part in (card.title, card.body, card.tip):
-            assert not _BANNED.search(part), (n, part)
-            assert not _EMOJI.search(part), (n, part)  # в шаблоне уже 2 эмодзи
-        assert course.card_for(n) is card
-
-
-def test_course_has_all_30_unique_cards():
-    assert len(course.CARDS) == course.COURSE_LENGTH == 30
-    titles = [card.title for card in course.CARDS]
-    assert len(set(titles)) == len(titles)
-    assert course.card_for(30) is course.CARDS[-1]
-    assert course.card_for(31) is None
-
-
-def test_format_card_escapes_html():
-    card = course.Card(title="A < B", body="x & y", tip="<i>")
-    text = course.format_card(3, card)
-    assert text == "📚 Знание дня · 3/30\n\n<b>A &lt; B</b>\n\nx &amp; y\n\n💡 &lt;i&gt;"
-
-
 # --- свежие данные и ошибки по одному пользователю ---
 
 
@@ -322,10 +252,9 @@ async def test_stop_tips_after_list_is_respected():
     bot = Bot(token=BOT_TOKEN, session=session)
     await storage.save_user(_user(1, onboarded=MON - timedelta(days=20)))
     counts = await run_daily(storage, bot, at_9_msk(MON))
-    assert counts == {"cards": 0, "reminders": 0, "deactivated": 0}
+    assert counts == {"reminders": 0, "deactivated": 0}
     assert _sent(session) == []
-    user = await storage.get_user(1)
-    assert user.tips_enabled is False and user.course_day == 0
+    assert (await storage.get_user(1)).tips_enabled is False
 
 
 class _BrokenForOneStorage(MemoryStorage):
@@ -339,11 +268,11 @@ async def test_storage_error_for_one_user_does_not_abort_run(caplog):
     storage = _BrokenForOneStorage()
     session = MockedSession()
     bot = Bot(token=BOT_TOKEN, session=session)
-    await storage.save_user(_user(1, onboarded=SAT))
-    await storage.save_user(_user(2, onboarded=SAT))
-    await storage.upsert_weight(2, SAT, 70.0)
-    counts = await run_daily(storage, bot, at_9_msk(SAT + timedelta(days=1)))
-    assert counts == {"cards": 1, "reminders": 0, "deactivated": 0}
+    old = MON - timedelta(days=20)
+    await storage.save_user(_user(1, onboarded=old))
+    await storage.save_user(_user(2, onboarded=old))
+    counts = await run_daily(storage, bot, at_9_msk(MON))
+    assert counts == {"reminders": 1, "deactivated": 0}
     assert {m.chat_id for m in _sent(session)} == {2}
     [rec] = [r for r in caplog.records if r.name == "bot.daily" and r.exc_info]
     assert rec.user_id == 1 and rec.error_kind == "daily"

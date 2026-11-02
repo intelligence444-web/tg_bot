@@ -10,7 +10,6 @@ from PIL import Image
 from bot import texts
 from bot.handlers.meals import format_meal
 from bot.models import Analysis, FoodItem, Meal, User
-from bot.tips import Tip
 from bot.vision import VisionUnavailable
 from tests.fakes import FakeVision, make_callback, make_message, onboard
 
@@ -78,8 +77,7 @@ def _callbacks(markup) -> list[str]:
 
 
 def test_format_meal_lines():
-    tip = Tip("sweet", 0, "Совет дня")
-    text = format_meal(pasta(), "lunch", 1266.4, tip)
+    text = format_meal(pasta(), "lunch", 1266.4, "Совет дня")
     lines = text.splitlines()
     assert "🍽 Вермишель отварная — 200 г — 230 ккал" in lines
     assert "🍽 Масло в гарнире — 5 г — 45 ккал (предположение)" in lines
@@ -337,14 +335,16 @@ async def test_overeat_once_per_day(bot_env):
     await dp.feed_update(bot, make_message(photo=True))
     last = session.texts()[-1]
     assert texts.OVEREAT not in last
-    assert any(v in last for v in texts.TIPS["no_veg"])
 
 
-async def test_tip_variant_remembered(bot_env):
+async def test_no_rule_based_tips(bot_env):
     dp, bot, session, deps = await _setup(bot_env, [big(400)])
     await dp.feed_update(bot, make_message(photo=True))
-    user = await deps.storage.get_user(1)
-    assert "no_veg" in user.last_tip_variants
+    text = session.texts()[-1]
+    assert texts.OVEREAT not in text
+    assert not text.rstrip().endswith("овощей — объём больше, калорий почти ноль")
+    assert not hasattr(texts, "TIPS")
+    assert (await deps.storage.get_user(1)).last_tip_variants == {}
 
 
 async def test_photo_after_midnight_msk_goes_to_new_day(bot_env):
@@ -401,10 +401,10 @@ class _MutatingVision(FakeVision):
 
 async def test_photo_rereads_user_after_vision(bot_env):
     dp, bot, session, deps = await _setup(bot_env, [])
-    deps.vision = _MutatingVision([big(400)], deps.storage)  # big(400) даёт совет no_veg → save_user
+    deps.vision = _MutatingVision([big(3000)], deps.storage)  # перебор нормы → save_user
     await dp.feed_update(bot, make_message(photo=True))
     user = await deps.storage.get_user(1)
-    assert "no_veg" in user.last_tip_variants
+    assert user.last_overeat_date == TODAY
     assert user.course_day == 5 and user.tips_enabled is False
 
 
@@ -528,7 +528,7 @@ def test_format_meal_caps_items():
     many = Analysis(
         True, "high", tuple(item("Очень длинное название блюда " * 10 + str(n), 10, 10) for n in range(40)), False
     )
-    text = format_meal(many, "lunch", 100, Tip("sweet", 0, "Совет дня"))
+    text = format_meal(many, "lunch", 100, "Совет дня")
     assert text.count("🍽") == 15
     assert "…и ещё 25 позиций" in text
     assert "Итого: 400 ккал" in text
