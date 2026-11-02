@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from bot.models import Analysis, FoodItem
-from bot.ydb_storage import table_ddl
+from bot.ydb_storage import table_ddl, users_alter_ddl
 from scripts import create_tables, eval_vision, set_webhook
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,10 +28,18 @@ def test_print_yql_equals_ddl():
 
 def test_deploy_md_contains_every_create_table_verbatim():
     statements = table_ddl()
-    assert len(statements) == 6
+    assert len(statements) == 9
     for statement in statements:
         assert statement in DEPLOY
     assert "transition_from_kcal Double" in DEPLOY
+
+
+def test_deploy_md_contains_users_alter_block():
+    statements = users_alter_ddl()
+    assert len(statements) == 4
+    assert "\n".join(statements) in DEPLOY
+    for name in ("first_seen_at Timestamp", "next_topic Int32", "last_topic_offer_date Date", "last_profile_hint_date Date"):
+        assert f"ALTER TABLE `users` ADD COLUMN {name};" in DEPLOY
 
 
 def test_deploy_md_contains_api_gateway_spec():

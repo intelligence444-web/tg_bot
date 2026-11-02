@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from bot.models import Activity, Norm, Profile, Sex, User
+from bot.models import ActivityLevel, Norm, Profile, Sex, User
 
-ACTIVITY_FACTORS: dict[Activity, float] = {
+ACTIVITY_FACTORS: dict[ActivityLevel, float] = {
     "sedentary": 1.2,
     "light": 1.375,
     "moderate": 1.55,

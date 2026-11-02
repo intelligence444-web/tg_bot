@@ -27,7 +27,8 @@ from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
 from ydb import convert
 
-from bot.models import Analysis, FoodItem, Meal, Norm, Profile, User, Weighing
+from bot.models import CHAT_TEXT_MAX, Activity, Analysis, ChatMessage, FoodItem, Meal, Norm, Profile, User, Weighing
+from bot.storage import CHAT_WINDOW, free_chat_timestamp
 
 T = ydb.PrimitiveType
 UTC = timezone.utc
@@ -53,8 +54,14 @@ USERS_COLUMNS: dict[str, T] = {
     "is_active": T.Bool,
     "last_overeat_date": T.Date,
     "last_tip_variants": T.Json,
+    # v1.1 — для уже созданной базы добавляются ALTER-ом (users_alter_ddl)
+    "first_seen_at": T.Timestamp,
+    "next_topic": T.Int32,
+    "last_topic_offer_date": T.Date,
+    "last_profile_hint_date": T.Date,
     "updated_at": T.Timestamp,
 }
+USERS_V11_COLUMNS = ("first_seen_at", "next_topic", "last_topic_offer_date", "last_profile_hint_date")
 MEALS_COLUMNS: dict[str, T] = {
     "user_id": T.Int64,
     "meal_id": T.Utf8,
@@ -74,6 +81,18 @@ WEIGHTS_COLUMNS: dict[str, T] = {
 FSM_COLUMNS: dict[str, T] = {"key": T.Utf8, "state": T.Utf8, "data_json": T.Json}
 PROCESSED_COLUMNS: dict[str, T] = {"key": T.Utf8, "created_at": T.Timestamp}
 ALERTS_COLUMNS: dict[str, T] = {"kind": T.Utf8, "last_sent_at": T.Timestamp}
+# Ключ (user_id, created_at): уникальность времени обеспечивает запись (free_chat_timestamp в транзакции).
+CHAT_COLUMNS: dict[str, T] = {"user_id": T.Int64, "created_at": T.Timestamp, "role": T.Utf8, "text": T.Utf8}
+ACTIVITIES_COLUMNS: dict[str, T] = {
+    "user_id": T.Int64,
+    "activity_id": T.Utf8,
+    "local_date": T.Date,
+    "name": T.Utf8,
+    "kcal_burned": T.Double,
+    "kcal_credit": T.Double,
+    "created_at": T.Timestamp,
+}
+AI_USAGE_COLUMNS: dict[str, T] = {"user_id": T.Int64, "local_date": T.Date, "count": T.Int32}
 
 _TABLES: dict[str, tuple[dict[str, T], tuple[str, ...]]] = {
     "users": (USERS_COLUMNS, ("user_id",)),
@@ -82,8 +101,14 @@ _TABLES: dict[str, tuple[dict[str, T], tuple[str, ...]]] = {
     "fsm": (FSM_COLUMNS, ("key",)),
     "processed_updates": (PROCESSED_COLUMNS, ("key",)),
     "alerts": (ALERTS_COLUMNS, ("kind",)),
+    "chat_messages": (CHAT_COLUMNS, ("user_id", "created_at")),
+    "activities": (ACTIVITIES_COLUMNS, ("user_id", "activity_id")),
+    "ai_usage": (AI_USAGE_COLUMNS, ("user_id", "local_date")),
 }
-_TTL = {"processed_updates": 'WITH (TTL = Interval("P1D") ON created_at)'}
+_TTL = {
+    "processed_updates": 'WITH (TTL = Interval("P1D") ON created_at)',
+    "chat_messages": 'WITH (TTL = Interval("P7D") ON created_at)',
+}
 
 
 # ---------- значения: Python <-> YDB ----------
@@ -163,6 +188,10 @@ def user_to_row(user: User, now: datetime | None = None) -> dict[str, Any]:
         "is_active": user.is_active,
         "last_overeat_date": user.last_overeat_date,
         "last_tip_variants": _json_out(dict(user.last_tip_variants)),
+        "first_seen_at": _ts_out(user.first_seen_at),
+        "next_topic": user.next_topic,
+        "last_topic_offer_date": user.last_topic_offer_date,
+        "last_profile_hint_date": user.last_profile_hint_date,
         "updated_at": _ts_out(now or datetime.now(UTC)),
     }
 
@@ -175,6 +204,7 @@ def user_from_row(row: Mapping[str, Any]) -> User:
     course_day = row["course_day"]
     tips_enabled = row["tips_enabled"]
     is_active = row["is_active"]
+    next_topic = row.get("next_topic")  # новые колонки v1.1 могут отсутствовать до ALTER
     return User(
         user_id=int(row["user_id"]),
         consent_at=_ts_in(row["consent_at"]),
@@ -191,6 +221,10 @@ def user_from_row(row: Mapping[str, Any]) -> User:
         is_active=True if is_active is None else bool(is_active),
         last_overeat_date=_date_in(row["last_overeat_date"]),
         last_tip_variants={str(k): int(v) for k, v in (variants or {}).items()},
+        first_seen_at=_ts_in(row.get("first_seen_at")),
+        next_topic=0 if next_topic is None else int(next_topic),
+        last_topic_offer_date=_date_in(row.get("last_topic_offer_date")),
+        last_profile_hint_date=_date_in(row.get("last_profile_hint_date")),
     )
 
 
@@ -237,6 +271,43 @@ def meal_from_row(row: Mapping[str, Any]) -> Meal:
     )
 
 
+def activity_to_row(a: Activity) -> dict[str, Any]:
+    return {
+        "user_id": a.user_id,
+        "activity_id": a.activity_id,
+        "local_date": a.local_date,
+        "name": a.name,
+        "kcal_burned": float(a.kcal_burned),
+        "kcal_credit": float(a.kcal_credit),
+        "created_at": _ts_out(a.created_at),
+    }
+
+
+def activity_from_row(row: Mapping[str, Any]) -> Activity:
+    return Activity(
+        user_id=int(row["user_id"]),
+        activity_id=row["activity_id"],
+        local_date=_date_in(row["local_date"]),
+        name=row["name"],
+        kcal_burned=float(row["kcal_burned"]),
+        kcal_credit=float(row["kcal_credit"]),
+        created_at=_ts_in(row["created_at"]),
+    )
+
+
+def chat_to_row(user_id: int, msg: ChatMessage) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "created_at": _ts_out(msg.created_at),
+        "role": msg.role,
+        "text": msg.text[:CHAT_TEXT_MAX],
+    }
+
+
+def chat_from_row(row: Mapping[str, Any]) -> ChatMessage:
+    return ChatMessage(role=row["role"], text=row["text"], created_at=_ts_in(row["created_at"]))
+
+
 # ---------- схема ----------
 
 
@@ -254,6 +325,12 @@ def table_ddl(prefix: str = "") -> list[str]:
 
 
 create_tables_queries = table_ddl  # прежнее имя
+
+
+def users_alter_ddl(prefix: str = "") -> list[str]:
+    """ALTER для базы, созданной до v1.1: новые колонки ``users`` (типы — из USERS_COLUMNS)."""
+    _check_prefix(prefix)
+    return [f"ALTER TABLE `{prefix}users` ADD COLUMN {c} {USERS_COLUMNS[c]};" for c in USERS_V11_COLUMNS]
 
 
 async def create_tables(pool: ydb.aio.QuerySessionPool, prefix: str = "") -> None:
@@ -308,6 +385,9 @@ class YdbStorage:
         self._weights = f"`{p}weights`"
         self._processed = f"`{p}processed_updates`"
         self._alerts = f"`{p}alerts`"
+        self._chat = f"`{p}chat_messages`"
+        self._activities = f"`{p}activities`"
+        self._ai_usage = f"`{p}ai_usage`"
 
     async def _query(self, query: str, params: dict[str, Any] | None = None) -> list[Any]:
         return _first_rows(await self._pool.execute_with_retries(query, params))
@@ -445,6 +525,118 @@ class YdbStorage:
             "ORDER BY user_id;"
         )
         return [user_from_row(r) for r in rows]
+
+    async def meals_between(self, user_id: int, start: date, end: date) -> list[Meal]:
+        rows = await self._query(
+            f"SELECT * FROM {self._meals} WHERE user_id = $user_id AND local_date >= $start AND local_date <= $end "
+            "ORDER BY eaten_at;",
+            {"$user_id": (user_id, T.Int64), "$start": (start, T.Date), "$end": (end, T.Date)},
+        )
+        return [meal_from_row(r) for r in rows]
+
+    # --- активности ---
+
+    async def add_activity(self, a: Activity) -> None:
+        row = activity_to_row(a)
+        await self._query(
+            self._upsert_sql(self._activities, row),
+            typed_params(ACTIVITIES_COLUMNS, row, {"user_id", "activity_id"}),
+        )
+
+    async def get_activity(self, user_id: int, activity_id: str) -> Activity | None:
+        rows = await self._query(
+            f"SELECT * FROM {self._activities} WHERE user_id = $user_id AND activity_id = $activity_id;",
+            {"$user_id": (user_id, T.Int64), "$activity_id": (activity_id, T.Utf8)},
+        )
+        return activity_from_row(rows[0]) if rows else None
+
+    async def delete_activity(self, user_id: int, activity_id: str) -> bool:
+        params = {"$user_id": (user_id, T.Int64), "$activity_id": (activity_id, T.Utf8)}
+        where = "WHERE user_id = $user_id AND activity_id = $activity_id"
+
+        async def callee(tx: ydb.aio.QueryTxContext) -> bool:
+            if not await _tx_rows(tx, f"SELECT activity_id FROM {self._activities} {where};", params):
+                return False
+            await _drain(await tx.execute(f"DELETE FROM {self._activities} {where};", params))
+            return True
+
+        return await self._pool.retry_tx_async(callee)
+
+    async def activities_on(self, user_id: int, day: date) -> list[Activity]:
+        return await self.activities_between(user_id, day, day)
+
+    async def activities_between(self, user_id: int, start: date, end: date) -> list[Activity]:
+        rows = await self._query(
+            f"SELECT * FROM {self._activities} WHERE user_id = $user_id AND local_date >= $start "
+            "AND local_date <= $end ORDER BY created_at;",
+            {"$user_id": (user_id, T.Int64), "$start": (start, T.Date), "$end": (end, T.Date)},
+        )
+        return [activity_from_row(r) for r in rows]
+
+    # --- переписка ---
+
+    async def add_chat_message(self, user_id: int, msg: ChatMessage) -> None:
+        created_at = _ts_out(msg.created_at)
+        key_params = {"$user_id": (user_id, T.Int64), "$created_at": (created_at, T.Timestamp)}
+
+        async def callee(tx: ydb.aio.QueryTxContext) -> None:
+            # Чтение и запись в одной serializable-транзакции: занятое время сдвигаем на 1 мкс.
+            taken = await _tx_rows(
+                tx,
+                f"SELECT created_at FROM {self._chat} WHERE user_id = $user_id AND created_at >= $created_at;",
+                key_params,
+            )
+            free = free_chat_timestamp(created_at, (_ts_in(r["created_at"]) for r in taken))
+            row = chat_to_row(user_id, dataclasses.replace(msg, created_at=free))
+            await _drain(
+                await tx.execute(
+                    self._upsert_sql(self._chat, row), typed_params(CHAT_COLUMNS, row, {"user_id", "created_at"})
+                )
+            )
+
+        await self._pool.retry_tx_async(callee)
+
+    async def recent_chat(self, user_id: int, now: datetime, limit: int = 10) -> list[ChatMessage]:
+        if limit <= 0:
+            return []
+        rows = await self._query(
+            f"SELECT created_at, role, text FROM {self._chat} WHERE user_id = $user_id AND created_at >= $since "
+            "ORDER BY created_at DESC LIMIT $limit;",
+            {
+                "$user_id": (user_id, T.Int64),
+                "$since": (_ts_out(now) - CHAT_WINDOW, T.Timestamp),
+                "$limit": (limit, T.Uint64),
+            },
+        )
+        return [chat_from_row(r) for r in reversed(rows)]
+
+    # --- лимит ИИ ---
+
+    async def incr_ai_usage(self, user_id: int, day: date) -> int:
+        params = {"$user_id": (user_id, T.Int64), "$local_date": (day, T.Date)}
+
+        async def callee(tx: ydb.aio.QueryTxContext) -> int:
+            rows = await _tx_rows(
+                tx,
+                f"SELECT count FROM {self._ai_usage} WHERE user_id = $user_id AND local_date = $local_date;",
+                params,
+            )
+            current = rows[0]["count"] if rows else None
+            value = (0 if current is None else int(current)) + 1
+            await _drain(
+                await tx.execute(
+                    f"UPSERT INTO {self._ai_usage} (user_id, local_date, count) VALUES ($user_id, $local_date, $count);",
+                    {**params, "$count": (value, ydb.OptionalType(T.Int32))},
+                )
+            )
+            return value
+
+        return await self._pool.retry_tx_async(callee)
+
+
+async def _tx_rows(tx: ydb.aio.QueryTxContext, query: str, params: dict[str, Any]) -> list[Any]:
+    """Строки первого результата запроса внутри транзакции (поток дочитывается целиком)."""
+    return _first_rows(await convert.aggregate_result_sets_by_index_async(await tx.execute(query, params)))
 
 
 async def _drain(it: Any) -> None:

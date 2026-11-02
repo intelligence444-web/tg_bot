@@ -5,10 +5,14 @@ from datetime import date, datetime
 from typing import Literal
 
 Sex = Literal["male", "female"]
-Activity = Literal["sedentary", "light", "moderate", "high", "very_high"]
+ActivityLevel = Literal["sedentary", "light", "moderate", "high", "very_high"]
 Goal = Literal["lose", "maintain", "gain"]
 MealType = Literal["breakfast", "lunch", "snack", "dinner"]
 Category = Literal["main", "side", "vegetable", "fruit", "sweet", "drink", "sauce", "fat", "other"]
+
+ChatRole = Literal["user", "assistant"]
+
+CHAT_TEXT_MAX = 2000  # знаков реплики в истории переписки
 
 # КБЖУ на 100 г: (ккал, белки, жиры, углеводы)
 _BUTTER_PER_100 = (748.0, 0.5, 82.5, 0.8)
@@ -21,7 +25,7 @@ class Profile:
     age: int
     height_cm: float
     weight_kg: float
-    activity: Activity
+    activity: ActivityLevel
     goal: Goal
     target_weight_kg: float | None
 
@@ -131,3 +135,27 @@ class User:
     is_active: bool = True
     last_overeat_date: date | None = None
     last_tip_variants: dict[str, int] = field(default_factory=dict)
+    first_seen_at: datetime | None = None  # первый /start
+    next_topic: int = 0  # номер следующей темы (с 0)
+    last_topic_offer_date: date | None = None
+    last_profile_hint_date: date | None = None
+
+
+@dataclass(frozen=True)
+class Activity:
+    """Физическая активность за день: сожжено ``kcal_burned``, в норму добавлено ``kcal_credit``."""
+
+    user_id: int
+    activity_id: str
+    local_date: date
+    name: str
+    kcal_burned: float
+    kcal_credit: float
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ChatMessage:
+    role: ChatRole
+    text: str
+    created_at: datetime

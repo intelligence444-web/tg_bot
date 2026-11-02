@@ -135,7 +135,8 @@ yc ydb database get calorie-bot-db
 2. Нажмите **«Новый SQL-запрос»**.
 3. Скопируйте **весь** текст ниже целиком и вставьте в окно запроса.
 4. Нажмите **«Выполнить»**. Должно появиться сообщение об успешном выполнении, а слева —
-   шесть таблиц: `users`, `meals`, `weights`, `fsm`, `processed_updates`, `alerts`.
+   девять таблиц: `users`, `meals`, `weights`, `fsm`, `processed_updates`, `alerts`,
+   `chat_messages`, `activities`, `ai_usage`.
    Запрос безопасно выполнить повторно: существующие таблицы он не трогает.
 
 ```sql
@@ -155,6 +156,10 @@ CREATE TABLE IF NOT EXISTS `users` (
     is_active Bool,
     last_overeat_date Date,
     last_tip_variants Json,
+    first_seen_at Timestamp,
+    next_topic Int32,
+    last_topic_offer_date Date,
+    last_profile_hint_date Date,
     updated_at Timestamp,
     PRIMARY KEY (user_id)
 );
@@ -198,12 +203,53 @@ CREATE TABLE IF NOT EXISTS `alerts` (
     last_sent_at Timestamp,
     PRIMARY KEY (kind)
 );
+
+CREATE TABLE IF NOT EXISTS `chat_messages` (
+    user_id Int64 NOT NULL,
+    created_at Timestamp NOT NULL,
+    role Utf8,
+    text Utf8,
+    PRIMARY KEY (user_id, created_at)
+)
+WITH (TTL = Interval("P7D") ON created_at);
+
+CREATE TABLE IF NOT EXISTS `activities` (
+    user_id Int64 NOT NULL,
+    activity_id Utf8 NOT NULL,
+    local_date Date,
+    name Utf8,
+    kcal_burned Double,
+    kcal_credit Double,
+    created_at Timestamp,
+    PRIMARY KEY (user_id, activity_id)
+);
+
+CREATE TABLE IF NOT EXISTS `ai_usage` (
+    user_id Int64 NOT NULL,
+    local_date Date NOT NULL,
+    count Int32,
+    PRIMARY KEY (user_id, local_date)
+);
 ```
 
 В свежей таблице `users` уже есть колонка `transition_from_kcal` (плавный выход на
 поддержание веса), отдельно добавлять её не нужно.
 
-Тот же текст печатает команда `python -m scripts.create_tables --print-yql`, а
+**Если база создана до версии 1.1** (таблица `users` уже есть). Сначала выполните текст
+выше целиком — он создаст недостающие таблицы `chat_messages`, `activities`, `ai_usage`, а
+существующие не тронет. Затем отдельным SQL-запросом добавьте в `users` новые колонки:
+
+```sql
+ALTER TABLE `users` ADD COLUMN first_seen_at Timestamp;
+ALTER TABLE `users` ADD COLUMN next_topic Int32;
+ALTER TABLE `users` ADD COLUMN last_topic_offer_date Date;
+ALTER TABLE `users` ADD COLUMN last_profile_hint_date Date;
+```
+
+Этот запрос выполняется один раз: повторный запуск сообщит, что колонка уже существует, —
+это не ошибка, данные не пострадают. В свежей базе он не нужен: колонки уже есть в `users`.
+
+Текст создания таблиц (первый запрос) печатает команда `python -m scripts.create_tables --print-yql`, а
 `python -m scripts.create_tables` создаёт таблицы сама (нужен Python и переменные
 `YDB_ENDPOINT`, `YDB_DATABASE`, а также доступ к базе, например `YDB_ACCESS_TOKEN_CREDENTIALS`
 с IAM-токеном из `yc iam create-token`). Это вариант для разработчика, вам он не нужен.
