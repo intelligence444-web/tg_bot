@@ -9,7 +9,11 @@ from bot.models import Sex
 
 _MALE = {"м", "муж", "мужчина", "мужской", "m", "male", "man"}
 _FEMALE = {"ж", "жен", "женщина", "женский", "f", "female", "w", "woman"}
-_UNITS = {"см", "кг", "лет", "год", "года", "г", "cm", "kg", "y", "yo"}
+_UNITS = {
+    "см", "кг", "лет", "год", "года", "г", "л", "р", "гр",
+    "рост", "вес", "возраст", "мне",
+    "cm", "kg", "y", "yo",
+}
 
 _WORD = re.compile(r"[a-zа-яё]+")
 # Десятичная запятая — только с одной цифрой после неё: «60,5», но не «1987,180».
@@ -67,6 +71,8 @@ _WEIGHT_RE = re.compile(r"(вес\s*)?(\d{2,3}(?:[.,]\d)?)\s*(кг)?", re.IGNORE
 _STEPS_BEFORE = re.compile(r"(?<![\d.,])(\d{1,3}(?:[   ]\d{3})+|\d+)\s*шаг", re.IGNORECASE)
 _STEPS_AFTER = re.compile(r"шаг\w*[\s:=-]*(\d{1,3}(?:[   ]\d{3})+|\d+)(?![\d.,])", re.IGNORECASE)
 
+_STEPS_K = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d)?)\s*(?:к|k|тыс\w*)\s*шаг", re.IGNORECASE)
+
 
 def parse_weight_text(text: str) -> float | None:
     m = _WEIGHT_RE.fullmatch(text.strip())
@@ -77,6 +83,10 @@ def parse_weight_text(text: str) -> float | None:
 
 
 def parse_steps(text: str) -> int | None:
+    k = _STEPS_K.search(text)
+    if k:
+        n = round(float(k.group(1).replace(",", ".")) * 1000)
+        return n if 500 <= n <= 100_000 else None
     m = _STEPS_BEFORE.search(text) or _STEPS_AFTER.search(text)
     if not m:
         return None
