@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards, texts
-from bot.handlers.onboarding import Onboarding, start_onboarding
+from bot.handlers.onboarding import ProfileFlow
 from bot.models import User
 
 if TYPE_CHECKING:
@@ -19,9 +19,17 @@ if TYPE_CHECKING:
 async def _get_or_create(deps: Deps, user_id: int) -> User:
     user = await deps.storage.get_user(user_id)
     if user is None:
-        user = User(user_id=user_id)
+        user = User(user_id=user_id, first_seen_at=deps.clock())
+        await deps.storage.save_user(user)
+    elif user.first_seen_at is None:
+        user.first_seen_at = deps.clock()
         await deps.storage.save_user(user)
     return user
+
+
+async def _greet(message: Message, user: User) -> None:
+    text = texts.WELCOME_READY if user.profile is None else texts.WELCOME_BACK
+    await message.answer(text, reply_markup=keyboards.main_menu())
 
 
 async def on_start(message: Message, state: FSMContext, deps: Deps) -> None:
@@ -29,10 +37,8 @@ async def on_start(message: Message, state: FSMContext, deps: Deps) -> None:
     await state.clear()
     if user.consent_at is None:
         await message.answer(texts.WELCOME, reply_markup=keyboards.consent())
-    elif user.profile is None:
-        await start_onboarding(message, state)
     else:
-        await message.answer(texts.WELCOME_BACK, reply_markup=keyboards.main_menu())
+        await _greet(message, user)
 
 
 async def on_consent(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
@@ -41,12 +47,9 @@ async def on_consent(callback: CallbackQuery, state: FSMContext, deps: Deps) -> 
     if user.consent_at is None:
         user.consent_at = deps.clock()
         await deps.storage.save_user(user)
-    if await state.get_state() in Onboarding:
-        return  # старая кнопка «Согласен» посреди анкеты — анкету не перезапускаем
-    if user.profile is None:
-        await start_onboarding(callback.message, state)
-    else:
-        await callback.message.answer(texts.WELCOME_BACK, reply_markup=keyboards.main_menu())
+    if await state.get_state() in ProfileFlow:
+        return  # старая кнопка «Согласен» посреди шагов профиля — их не сбиваем
+    await _greet(callback.message, user)
 
 
 def build_router() -> Router:
@@ -105,7 +108,7 @@ async def on_help(message: Message) -> None:
 
 
 def build_commands_router() -> Router:
-    """Ставится после шлагбаума и до анкеты: работает в любом состоянии и не сбрасывает его."""
+    """Ставится после шлагбаума и до шагов профиля: работает в любом состоянии и не сбрасывает его."""
     r = Router(name="commands")
     r.message.register(on_stop_tips, Command("stop_tips"))
     r.message.register(on_start_tips, Command("start_tips"))

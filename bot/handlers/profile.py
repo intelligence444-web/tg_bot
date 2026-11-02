@@ -1,8 +1,8 @@
 """«👤 Мой профиль» (спец. 6.9): данные, норма, шкала прогресса и кнопки.
 
-Колбэки: ``profile:goal`` — шаги 6–7 анкеты со стартовым весом = вес тренда (как
-``goal_done:new``); ``profile:restart`` — анкета заново (``onboarded_at`` и ``course_day``
-не меняются, см. ``finish_onboarding``). ``chart`` обрабатывает ``bot.handlers.weight``.
+Колбэки: ``profile:goal`` — шаги цели и желаемого веса со стартовым весом = вес тренда (как
+``goal_done:new``); ``profile:restart`` — просьба прислать строку профиля заново (дальше —
+те же шаги; ``onboarded_at`` и ``course_day`` не меняются, см. ``finish_onboarding``). ``chart`` обрабатывает ``bot.handlers.weight``.
 """
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards, texts
 from bot.calc import effective_norm, format_num
-from bot.handlers.onboarding import start_goal_step, start_onboarding
+from bot.handlers.onboarding import ask_profile_line, start_goal_step
 from bot.handlers.weight import (
-    ask_onboarding,
+    ask_profile,
     corridor_out,
     current_trend,
     format_progress,
@@ -61,7 +61,7 @@ def format_profile(user: User, weighings: list[Weighing], today: date) -> str:
 async def on_profile(message: Message, state: FSMContext, deps: Deps) -> None:
     user = await load_profile_user(deps, message.from_user.id)
     if user is None:
-        await ask_onboarding(message, state)
+        await ask_profile(message, state)
         return
     today = today_for(deps)
     weighings = await deps.storage.weights(user.user_id)
@@ -74,14 +74,14 @@ async def on_profile_goal(callback: CallbackQuery, state: FSMContext, deps: Deps
     await callback.answer()
     user = await load_profile_user(deps, callback.from_user.id)
     if user is None:
-        await start_onboarding(callback.message, state)
+        await ask_profile(callback.message, state)
         return
     await start_goal_step(callback.message, state, user, weight_kg=await trend_now(user, deps))
 
 
 async def on_profile_restart(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await start_onboarding(callback.message, state)
+    await ask_profile_line(callback.message, state)
 
 
 def build_router() -> Router:

@@ -26,7 +26,7 @@ from bot import keyboards, texts
 from bot.calc import calculate_norm, effective_norm, format_num, parse_number, planned_pace_kg_week, round_half_up
 from bot.chart import render_weight_chart
 from bot.diary import to_local
-from bot.handlers.onboarding import WEIGHT_RANGE, start_goal_step, start_onboarding
+from bot.handlers.onboarding import WEIGHT_RANGE, start_goal_step
 from bot.models import User, Weighing
 from bot.progress import (
     actual_pace,
@@ -62,7 +62,7 @@ def today_for(deps: Deps) -> date:
 
 
 def goal_target(user: User) -> float:
-    """Желаемый вес N; у «держать вес» из анкеты его нет — тогда стартовый вес."""
+    """Желаемый вес N; у «держать вес» при расчёте нормы его нет — тогда стартовый вес."""
     p = user.profile
     if p.target_weight_kg is not None:
         return p.target_weight_kg
@@ -230,9 +230,10 @@ async def load_profile_user(deps: Deps, user_id: int) -> User | None:
     return user
 
 
-async def ask_onboarding(message: Message, state: FSMContext) -> None:
-    await message.answer(texts.NEED_ONBOARDING)
-    await start_onboarding(message, state)
+async def ask_profile(message: Message, state: FSMContext) -> None:
+    """Профиля нет (v1.1 3): приглашение прислать строку профиля."""
+    await state.clear()
+    await message.answer(texts.PROFILE_HINT)
 
 
 async def trend_now(user: User, deps: Deps) -> float:
@@ -245,7 +246,7 @@ async def trend_now(user: User, deps: Deps) -> float:
 
 async def on_weigh(message: Message, state: FSMContext, deps: Deps) -> None:
     if await load_profile_user(deps, message.from_user.id) is None:
-        await ask_onboarding(message, state)
+        await ask_profile(message, state)
         return
     await state.set_state(WeightInput.value)
     await state.set_data({})
@@ -260,7 +261,7 @@ async def on_weight_value(message: Message, state: FSMContext, deps: Deps) -> No
     await state.clear()
     user = await load_profile_user(deps, message.from_user.id)
     if user is None:
-        await ask_onboarding(message, state)
+        await ask_profile(message, state)
         return
     text, markup = await weighing_reply(user, today_for(deps), kg, deps)
     await message.answer(text, reply_markup=markup)

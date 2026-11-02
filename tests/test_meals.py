@@ -11,7 +11,7 @@ from bot import texts
 from bot.handlers.meals import format_meal
 from bot.models import Analysis, FoodItem, Meal, User
 from bot.vision import VisionUnavailable
-from tests.fakes import FakeVision, make_callback, make_message, onboard
+from tests.fakes import FakeVision, get_fsm_state, make_callback, make_message, onboard
 
 TODAY = date(2026, 10, 24)
 
@@ -310,14 +310,35 @@ async def test_album_analyzed_once_with_one_hint(bot_env):
     assert len(await deps.storage.meals_on(1, TODAY)) == 1
 
 
-async def test_photo_before_onboarding(bot_env):
+async def test_photo_before_profile_is_recorded_with_hint(bot_env):
     dp, bot, session, deps = await _setup(bot_env, [pasta()], onboarded=False)
     await deps.storage.save_user(User(user_id=1, consent_at=deps.clock()))
     await dp.feed_update(bot, make_message(photo=True))
-    t = session.texts()
-    assert any(x.startswith("Сначала посчитаем твою норму") for x in t)
-    assert t[-1] == texts.ASK_SEX
-    assert deps.vision.calls == []
+    t = session.texts()[-1]
+    assert "✅ Записал в дневник" in t
+    assert texts.PROFILE_HINT in t
+    assert "Осталось на сегодня" not in t
+    assert len(await deps.storage.meals_on(1, TODAY)) == 1
+    assert await get_fsm_state(dp) is None
+
+
+async def test_fat_button_before_profile_updates_meal(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta(ask=True)], onboarded=False)
+    await deps.storage.save_user(User(user_id=1, consent_at=deps.clock()))
+    await dp.feed_update(bot, make_message(photo=True))
+    meal = (await deps.storage.meals_on(1, TODAY))[0]
+    session.clear()
+    await dp.feed_update(bot, make_callback(f"fat:{meal.meal_id}:little"))
+    assert texts.MEAL_DELETED not in session.texts()
+    assert (await deps.storage.get_meal(1, meal.meal_id)).fat_answer == "little"
+    assert "Осталось на сегодня" not in session.texts()[-1]
+
+
+def test_format_meal_without_norm():
+    with_hint = format_meal(pasta(), "lunch", None, None, hint=texts.PROFILE_HINT)
+    assert with_hint.splitlines()[-1] == texts.PROFILE_HINT
+    plain = format_meal(pasta(), "lunch", None, None)
+    assert "Осталось" not in plain and plain.splitlines()[-1].startswith("✅ Записал")
 
 
 async def test_overeat_once_per_day(bot_env):
@@ -512,16 +533,14 @@ async def test_admin_alert_failure_is_logged(bot_env, caplog):
     assert any(getattr(r, "error_kind", None) == "admin_alert" for r in caplog.records)
 
 
-async def test_album_dedupe_before_profile_check(bot_env):
-    dp, bot, session, deps = await _setup(bot_env, [pasta()], onboarded=False)
+async def test_album_dedupe_before_profile(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [pasta(), pasta()], onboarded=False)
     await deps.storage.save_user(User(user_id=1, consent_at=deps.clock()))
     await dp.feed_update(bot, make_message(photo=True, media_group_id="g7"))
-    # второе фото альбома пришло параллельно — состояние анкеты ещё не видно
-    await fsm_context(dp).clear()
     session.clear()
     await dp.feed_update(bot, make_message(photo=True, media_group_id="g7"))
-    assert texts.NEED_ONBOARDING not in session.texts()
     assert session.texts() == [texts.ALBUM_HINT]
+    assert len(await deps.storage.meals_on(1, TODAY)) == 1
 
 
 def test_format_meal_caps_items():

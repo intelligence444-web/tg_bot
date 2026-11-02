@@ -6,7 +6,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from bot import texts
 
 CB_CONSENT = "consent"
-CB_SEX = "sex:"  # sex:{male|female}
+CB_PROFILE_YES = "pf:yes"
+CB_PROFILE_NO = "pf:no"
 CB_ACT = "act:"  # act:{activity}
 CB_GOAL = "goal:"  # goal:{lose|maintain|gain}
 CB_BMI_RETRY = "bmi:retry"
@@ -34,8 +35,8 @@ def consent() -> InlineKeyboardMarkup:
     return _inline([[(texts.BTN_CONSENT, CB_CONSENT)]])
 
 
-def sex() -> InlineKeyboardMarkup:
-    return _inline([[(texts.BTN_MALE, f"{CB_SEX}male"), (texts.BTN_FEMALE, f"{CB_SEX}female")]])
+def profile_confirm() -> InlineKeyboardMarkup:
+    return _inline([[(texts.BTN_PROFILE_YES, CB_PROFILE_YES), (texts.BTN_PROFILE_FIX, CB_PROFILE_NO)]])
 
 
 def activity() -> InlineKeyboardMarkup:

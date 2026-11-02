@@ -12,7 +12,7 @@ async def on_any_message(message: Message) -> None:
 
 
 async def on_stale_callback(callback: CallbackQuery) -> None:
-    # Кнопка из старого сообщения (например, шаг анкеты, которая уже пройдена).
+    # Кнопка из старого сообщения (например, шаг профиля, который уже пройден).
     await callback.answer()
 
 

@@ -90,6 +90,24 @@ def format_day(summary: DaySummary, norm: Norm, streak_days: int) -> str:
     return "\n".join(lines)
 
 
+def format_eaten(summary: DaySummary) -> str:
+    """Дневник без профиля (v1.1 3): съеденное за день без нормы и остатка."""
+    lines = [texts.DIARY_TITLE_NO_NORM.format(eaten=format_num(summary.kcal)), ""]
+    for mt in _ORDER:
+        label = texts.MEAL_LABELS[mt]
+        if mt in summary.by_type:
+            lines.append(texts.MEAL_LINE.format(label=label, kcal=format_num(summary.by_type[mt])))
+        else:
+            lines.append(texts.MEAL_EMPTY_NO_NORM.format(label=label))
+    lines.append("")
+    lines.append(
+        texts.DIARY_MACROS_NO_NORM.format(
+            protein=format_num(summary.protein), fat=format_num(summary.fat), carbs=format_num(summary.carbs)
+        )
+    )
+    return "\n".join(lines)
+
+
 def overeat_now(day_kcal_before: float, meal_kcal: float, norm_kcal: float, already_today: bool) -> bool:
     """Этот приём пищи впервые за день переводит сумму через норму."""
     return day_kcal_before <= norm_kcal < day_kcal_before + meal_kcal and not already_today

@@ -1,4 +1,4 @@
-"""Выход из анкеты и правки записи кнопками меню, фото и командами; только личные чаты."""
+"""Выход из шагов профиля и правки записи кнопками меню, фото и командами; только личные чаты."""
 from __future__ import annotations
 
 import io
@@ -10,7 +10,7 @@ from PIL import Image
 
 from bot import texts
 from bot.handlers.meals import MealEdit
-from bot.handlers.onboarding import Onboarding
+from bot.handlers.onboarding import ProfileFlow
 from bot.handlers.weight import WeightInput
 from bot.models import Analysis, FoodItem
 from tests.fakes import FakeVision, get_fsm_state, make_callback, make_message, onboard
@@ -41,46 +41,62 @@ async def _ready(bot_env, results=()):
     return dp, bot, session, deps
 
 
-# --- I5a: повторная анкета у пользователя с профилем ---
+# --- I5a: повторная строка профиля / новая цель у пользователя с профилем ---
 
 
-async def test_restart_onboarding_menu_button_leaves_it(bot_env):
+async def test_repeat_profile_line_menu_button_leaves_it(bot_env):
     dp, bot, session, deps = await _ready(bot_env)
-    await dp.feed_update(bot, make_callback("profile:restart"))
-    assert await get_fsm_state(dp) == Onboarding.sex.state
+    await dp.feed_update(bot, make_message("жен, 30, 165, 68"))
+    assert await get_fsm_state(dp) == ProfileFlow.confirm.state
     session.clear()
     await dp.feed_update(bot, make_message(texts.BTN_TODAY))
     assert await get_fsm_state(dp) is None
     assert session.texts()[-1].startswith("📅 Сегодня")
+    assert (await deps.storage.get_user(1)).profile.weight_kg == 70
 
 
 async def test_new_goal_step_photo_leaves_it(bot_env):
     dp, bot, session, deps = await _ready(bot_env, [_food()])
     await dp.feed_update(bot, make_callback("profile:goal"))
-    assert await get_fsm_state(dp) == Onboarding.goal.state
+    assert await get_fsm_state(dp) == ProfileFlow.goal.state
     session.clear()
     await dp.feed_update(bot, make_message(photo=True))
     assert await get_fsm_state(dp) is None
     assert len(await deps.storage.meals_on(1, TODAY)) == 1
 
 
-async def test_restart_onboarding_age_step_weigh_button_leaves_it(bot_env):
+async def test_repeat_profile_activity_step_weigh_button_leaves_it(bot_env):
     dp, bot, session, deps = await _ready(bot_env)
-    await dp.feed_update(bot, make_callback("profile:restart"))
-    await dp.feed_update(bot, make_callback("sex:male"))
+    await dp.feed_update(bot, make_message("муж, 40, 180, 90"))
+    await dp.feed_update(bot, make_callback("pf:yes"))
+    assert await get_fsm_state(dp) == ProfileFlow.activity.state
     await dp.feed_update(bot, make_message(texts.BTN_WEIGH))
     assert await get_fsm_state(dp) == WeightInput.value.state
     assert session.texts()[-1] == texts.ASK_WEIGHING
 
 
-async def test_first_onboarding_keeps_menu_button_inside(bot_env):
+async def test_first_profile_keeps_menu_button_inside(bot_env):
     dp, bot, session, deps = bot_env
     await dp.feed_update(bot, make_message("/start"))
     await dp.feed_update(bot, make_callback("consent"))
+    await dp.feed_update(bot, make_message("жен, 30, 165, 70"))
     session.clear()
     await dp.feed_update(bot, make_message(texts.BTN_TODAY))
-    assert await get_fsm_state(dp) == Onboarding.sex.state
+    assert await get_fsm_state(dp) == ProfileFlow.confirm.state
     assert session.texts()[-1].startswith(texts.USE_BUTTONS)
+
+
+async def test_first_profile_photo_reasks(bot_env):
+    dp, bot, session, deps = bot_env
+    deps.vision = FakeVision([_food()])
+    for upd in (make_message("/start"), make_callback("consent"), make_message("жен, 30, 165, 70"),
+                make_callback("pf:yes")):
+        await dp.feed_update(bot, upd)
+    session.clear()
+    await dp.feed_update(bot, make_message(photo=True))
+    assert await get_fsm_state(dp) == ProfileFlow.activity.state
+    assert session.texts()[-1].startswith(texts.USE_BUTTONS)
+    assert deps.vision.calls == []
 
 
 # --- I5b: правка записи ---
@@ -124,14 +140,15 @@ async def test_meal_sauce_menu_button_clears_state(bot_env):
 # --- I5c: старая кнопка «Согласен» ---
 
 
-async def test_stale_consent_tap_keeps_questionnaire(bot_env):
+async def test_stale_consent_tap_keeps_profile_steps(bot_env):
     dp, bot, session, deps = bot_env
-    for upd in (make_message("/start"), make_callback("consent"), make_callback("sex:female"), make_message("30")):
+    for upd in (make_message("/start"), make_callback("consent"), make_message("жен, 30, 165, 70"),
+                make_callback("pf:yes")):
         await dp.feed_update(bot, upd)
-    assert await get_fsm_state(dp) == Onboarding.height.state
+    assert await get_fsm_state(dp) == ProfileFlow.activity.state
     session.clear()
     await dp.feed_update(bot, make_callback("consent"))
-    assert await get_fsm_state(dp) == Onboarding.height.state
+    assert await get_fsm_state(dp) == ProfileFlow.activity.state
     assert session.texts() == []
 
 

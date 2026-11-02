@@ -273,16 +273,26 @@ async def test_chart_error_falls_back_to_text(bot_env, monkeypatch):
 # --- before onboarding / validation / menu ---
 
 
-async def test_weigh_before_onboarding_starts_it(bot_env):
+async def test_weigh_before_profile_gives_hint(bot_env):
     dp, bot, session, deps = bot_env
     await dp.feed_update(bot, make_message("/start"))
     await dp.feed_update(bot, make_callback("consent"))
-    await (await _ctx(dp)).clear()  # анкета начата, но не пройдена
     session.clear()
     await dp.feed_update(bot, make_message(texts.BTN_WEIGH))
-    sent = session.texts()
-    assert texts.NEED_ONBOARDING in sent
-    assert texts.ASK_SEX in sent
+    assert session.texts() == [texts.PROFILE_HINT]
+    assert await get_fsm_state(dp) is None
+
+
+async def test_weight_value_after_profile_lost_gives_hint(bot_env):
+    dp, bot, session, deps = await _env(bot_env)
+    await dp.feed_update(bot, make_message(texts.BTN_WEIGH))
+    user = await deps.storage.get_user(1)
+    user.profile = None
+    user.norm = None
+    await deps.storage.save_user(user)
+    session.clear()
+    await dp.feed_update(bot, make_message("69"))
+    assert session.texts() == [texts.PROFILE_HINT]
 
 
 async def _ctx(dp):
@@ -326,14 +336,13 @@ async def test_profile_shows_data_norm_progress(bot_env):
     assert {"chart", "profile:goal", "profile:restart"} <= set(_callbacks(msg))
 
 
-async def test_profile_before_onboarding(bot_env):
+async def test_profile_before_profile_line(bot_env):
     dp, bot, session, deps = bot_env
     await dp.feed_update(bot, make_message("/start"))
     await dp.feed_update(bot, make_callback("consent"))
-    await (await _ctx(dp)).clear()
     session.clear()
     await dp.feed_update(bot, make_message(texts.BTN_PROFILE))
-    assert texts.NEED_ONBOARDING in session.texts()
+    assert session.texts() == [texts.PROFILE_HINT]
 
 
 async def test_profile_goal_reuses_goal_steps(bot_env):
@@ -357,12 +366,11 @@ async def test_profile_restart_keeps_onboarded_and_course(bot_env):
     user.course_day = 5
     await deps.storage.save_user(user)
     await dp.feed_update(bot, make_callback("profile:restart"))
-    assert session.last_message().text == texts.ASK_SEX
+    assert session.last_message().text == texts.PROFILE_ASK
+    assert await get_fsm_state(dp) is None
     for upd in (
-        make_callback("sex:male"),
-        make_message("40"),
-        make_message("180"),
-        make_message("90"),
+        make_message("муж, 40, 180, 90"),
+        make_callback("pf:yes"),
         make_callback("act:light"),
         make_callback("goal:lose"),
         make_message("80"),

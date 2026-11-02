@@ -272,14 +272,16 @@ async def onboard(
     goal: str = "lose",
     target: str | None = "62",
 ) -> None:
-    """Проходит /start, согласие и анкету (по умолчанию — эталонный пример спец. 6.3)."""
+    """Проходит /start, согласие, строку профиля и кнопки (по умолчанию — эталонный пример спец. 6.3).
+
+    ``age`` — возраст или год рождения, как в строке профиля.
+    """
+    line = f"{'муж' if sex == 'male' else 'жен'}, {age}, {height}, {weight}"
     steps = [
         make_message("/start", user_id=user_id),
         make_callback("consent", user_id=user_id),
-        make_callback(f"sex:{sex}", user_id=user_id),
-        make_message(age, user_id=user_id),
-        make_message(height, user_id=user_id),
-        make_message(weight, user_id=user_id),
+        make_message(line, user_id=user_id),
+        make_callback("pf:yes", user_id=user_id),
         make_callback(f"act:{activity}", user_id=user_id),
         make_callback(f"goal:{goal}", user_id=user_id),
     ]

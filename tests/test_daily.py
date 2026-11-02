@@ -204,11 +204,11 @@ async def test_help_button(bot_env):
     assert "/stop_tips" in texts.HELP
 
 
-async def test_commands_mid_questionnaire_keep_state(bot_env):
+async def test_commands_mid_profile_steps_keep_state(bot_env):
     dp, bot, session, deps = bot_env
     await dp.feed_update(bot, make_message("/start"))
     await dp.feed_update(bot, make_callback("consent"))
-    await dp.feed_update(bot, make_callback("sex:female"))
+    await dp.feed_update(bot, make_message("жен, 30, 165, 70"))
     state = await get_fsm_state(dp)
     assert state is not None
     session.clear()
@@ -218,7 +218,7 @@ async def test_commands_mid_questionnaire_keep_state(bot_env):
     assert await get_fsm_state(dp) == state
     assert (await deps.storage.get_user(1)).tips_enabled is False
     session.clear()
-    await dp.feed_update(bot, make_message("30"))  # анкета продолжается
+    await dp.feed_update(bot, make_callback("pf:yes"))  # шаги профиля продолжаются
     assert await get_fsm_state(dp) != state
 
 

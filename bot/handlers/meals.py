@@ -24,7 +24,6 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMark
 from bot import keyboards, texts
 from bot.calc import effective_norm, format_num
 from bot.diary import meal_type_for, overeat_now, to_local
-from bot.handlers.onboarding import start_onboarding
 from bot.models import Analysis, Meal, MealType, User
 from bot.vision import BadImage, VisionError, VisionUnavailable, prepare_image
 
@@ -50,7 +49,10 @@ class MealEdit(StatesGroup):
 # --- форматирование ---
 
 
-def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, note: str | None) -> str:
+def format_meal(
+    analysis: Analysis, meal_type: MealType, remaining: float | None, note: str | None, *, hint: str | None = None
+) -> str:
+    """Ответ на приём пищи. ``remaining=None`` — профиля нет: вместо строки остатка ``hint`` (или ничего)."""
     lines = []
     for i in analysis.items[:MAX_SHOWN_ITEMS]:
         name = i.name if len(i.name) <= MAX_NAME_LEN else i.name[: MAX_NAME_LEN - 1] + "…"
@@ -75,22 +77,30 @@ def format_meal(analysis: Analysis, meal_type: MealType, remaining: float, note:
     lines.append(
         texts.MEAL_SAVED.format(meal_type=texts.MEAL_TYPE_NAMES[meal_type], kcal=format_num(analysis.kcal))
     )
-    lines.append(texts.MEAL_LEFT.format(left=format_num(max(0.0, remaining))))
+    if remaining is not None:
+        lines.append(texts.MEAL_LEFT.format(left=format_num(max(0.0, remaining))))
+    elif hint is not None:
+        lines.append(hint)
     if note is not None:
         lines.append("")
         lines.append(note)
     return "\n".join(lines)
 
 
-def _render(meal: Meal, remaining: float, note: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
-    text = format_meal(meal.analysis, meal.meal_type, remaining, note)
+def _render(
+    meal: Meal, remaining: float | None, note: str | None = None, *, hint: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    text = format_meal(meal.analysis, meal.meal_type, remaining, note, hint=hint)
     ask = meal.analysis.ask_about_fat
     if ask:
         text += f"\n\n{texts.ASK_FAT}"
     return text, keyboards.meal_result(meal.meal_id, ask_fat=ask)
 
 
-async def _remaining(deps: Deps, user: User, day: date) -> float:
+async def _remaining(deps: Deps, user: User, day: date) -> float | None:
+    """Остаток нормы на день; без профиля — None."""
+    if user.profile is None or user.norm is None:
+        return None
     meals = await deps.storage.meals_on(user.user_id, day)
     return effective_norm(user, day).kcal - sum(m.analysis.kcal for m in meals)
 
@@ -123,14 +133,6 @@ async def _vision_call(call) -> Analysis:
         raise VisionUnavailable("vision time budget exceeded", no_credits=False) from e
 
 
-async def _need_profile(message: Message, state: FSMContext, user: User | None) -> bool:
-    if user is not None and user.profile is not None and user.norm is not None:
-        return False
-    await message.answer(texts.NEED_ONBOARDING)
-    await start_onboarding(message, state)
-    return True
-
-
 async def _alert_no_credits(bot: Bot, deps: Deps) -> None:
     if deps.admin_chat_id is None:
         return
@@ -147,16 +149,13 @@ async def _alert_no_credits(bot: Bot, deps: Deps) -> None:
 async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) -> None:
     user_id = message.from_user.id
     now = deps.clock()
-    # Альбом отсекаем первым: остальные фото альбома не должны снова звать в анкету.
+    # Альбом отсекаем первым: остальные фото альбома не распознаются и не пишутся.
     group = message.media_group_id
     if group is not None and not await deps.storage.mark_processed(f"album:{group}", now):
         if await deps.storage.mark_processed(f"album-hint:{group}", now):
             await message.answer(texts.ALBUM_HINT)
         return
 
-    user = await deps.storage.get_user(user_id)
-    if await _need_profile(message, state, user):
-        return
     if await state.get_state() in (MealEdit.correction.state, MealEdit.sauce.state):
         await state.clear()
 
@@ -191,19 +190,19 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         return
     # Распознавание идёт до полутора минут: за это время пользователь мог измениться
     # (/stop_tips), поэтому пишем поверх свежей записи, а не старой.
-    user = await deps.storage.get_user(user_id)
-    if user is None or user.norm is None:
-        await _edit_or_send(status, texts.NEED_ONBOARDING, None)
-        return
+    user = await deps.storage.get_user(user_id) or User(user_id=user_id)
 
     now = deps.clock()
     local = to_local(now)
     today = local.date()
     meal_type = meal_type_for(local)
-    before = await deps.storage.meals_on(user_id, today)
-    day_before = sum(m.analysis.kcal for m in before)
-    norm_kcal = effective_norm(user, today).kcal
-    overeat = overeat_now(day_before, analysis.kcal, norm_kcal, user.last_overeat_date == today)
+    has_norm = user.profile is not None and user.norm is not None
+    overeat = False
+    if has_norm:
+        before = await deps.storage.meals_on(user_id, today)
+        day_before = sum(m.analysis.kcal for m in before)
+        norm_kcal = effective_norm(user, today).kcal
+        overeat = overeat_now(day_before, analysis.kcal, norm_kcal, user.last_overeat_date == today)
     meal = Meal(
         user_id=user_id,
         meal_id=uuid4().hex,
@@ -213,6 +212,16 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
         analysis=analysis,
     )
     await deps.storage.add_meal(meal)
+    if not has_norm:
+        # До профиля вместо остатка — приглашение заполнить профиль, не чаще раза в день (v1.1 3, п. 2).
+        hint = None
+        if user.last_profile_hint_date != today:
+            hint = texts.PROFILE_HINT
+            user.last_profile_hint_date = today
+            await deps.storage.save_user(user)
+        text, markup = _render(meal, None, hint=hint)
+        await _edit_or_send(status, text, markup)
+        return
     if overeat:
         user.last_overeat_date = today
         await deps.storage.save_user(user)
@@ -227,7 +236,7 @@ async def on_photo(message: Message, bot: Bot, state: FSMContext, deps: Deps) ->
 async def _load(callback: CallbackQuery, deps: Deps, meal_id: str) -> tuple[User, Meal] | None:
     meal = await deps.storage.get_meal(callback.from_user.id, meal_id)
     user = await deps.storage.get_user(callback.from_user.id)
-    if meal is None or user is None or user.norm is None:
+    if meal is None or user is None:
         await callback.answer(texts.MEAL_DELETED)
         return None
     return user, meal
@@ -334,7 +343,7 @@ async def on_correction_text(message: Message, state: FSMContext, deps: Deps) ->
     user_id = message.from_user.id
     meal = await deps.storage.get_meal(user_id, data.get("meal_id", ""))
     user = await deps.storage.get_user(user_id)
-    if meal is None or user is None or user.norm is None:
+    if meal is None or user is None:
         await message.answer(texts.MEAL_DELETED)
         return
     text = message.text

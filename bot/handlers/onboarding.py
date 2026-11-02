@@ -1,24 +1,27 @@
-"""Анкета (спец. 6.2–6.3, 7).
+"""Профиль одной строкой (v1.1 3, 4) и расчёт нормы (спец. 6.3, 7).
 
-Данные шагов копятся в данных FSM: ``sex``, ``age``, ``height``, ``weight``, ``activity``,
-``goal``, ``target``; ``pending_target`` — желаемый вес, ждущий подтверждения после
-предупреждения об ИМТ.
+Строка профиля («жен, 1996, 165, 70») разбирается ``bot.profile_line.parse_profile_line``;
+``handle_profile_text`` вызывается для текста вне состояний FSM (до Task 8 — временным
+обработчиком этого роутера). Дальше — состояния ``ProfileFlow``: подтверждение
+(``pf:yes`` / ``pf:no``) → активность (``act:``) → цель (``goal:``) → желаемый вес
+(число; ``bmi:retry`` / ``bmi:ok`` при ИМТ < 18,5) → итог.
 
-Вход с шага 1 — ``start_onboarding(message, state)``.
+Данные FSM: ``sex``, ``age``, ``height``, ``weight``, ``activity``, ``goal``;
+``pending_target`` — желаемый вес, ждущий подтверждения после предупреждения об ИМТ.
 
-Вход с шага 6 (новая цель, Task 10) — ``start_goal_step(message, state, user, weight_kg=...)``:
-кладёт в данные FSM ``{"goal_only": True, sex, age, height, weight, activity}`` из
-``user.profile`` (``weight`` заменяется на ``weight_kg``, например вес тренда) и ставит
-состояние ``Onboarding.goal``. Дальше работают обычные обработчики шагов 6–7, а итог
-собирается из тех же данных FSM. Флаг ``goal_only`` отличается одним: первое взвешивание
-не записывается (вес тренда — не замер). Стартовый вес, дата начала цели и сброс
-``milestones_sent`` — как при обычной анкете (``finish_onboarding``).
+Вход на шаг цели («Новая цель», «Изменить цель») — ``start_goal_step(message, state, user,
+weight_kg=...)``: кладёт в данные FSM ``{"goal_only": True, sex, age, height, weight, activity}``
+из ``user.profile`` (``weight`` заменяется на ``weight_kg``, например вес тренда) и ставит
+``ProfileFlow.goal``. Флаг ``goal_only`` отличается одним: первое взвешивание не записывается
+(вес тренда — не замер). Стартовый вес, дата начала цели и сброс ``milestones_sent`` — как
+при первом расчёте (``finish_onboarding``). Пока итог не показан, профиль не меняется.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -38,42 +41,81 @@ from bot.calc import (
 )
 from bot.diary import to_local
 from bot.models import Norm, Profile, User
+from bot.profile_line import ParsedProfile, parse_profile_line
 
 if TYPE_CHECKING:
+    from datetime import date
+
     from bot.app import Deps
 
-AGE_RANGE = (14, 100)
-HEIGHT_RANGE = (120, 230)
 WEIGHT_RANGE = (30, 300)
+MIN_AGE = 14
+MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
 
 
-class Onboarding(StatesGroup):
-    sex = State()
-    age = State()
-    height = State()
-    weight = State()
+class ProfileFlow(StatesGroup):
+    confirm = State()
     activity = State()
     goal = State()
     target = State()
 
 
-# --- входы в сценарий ---
+# --- строка профиля ---
 
 
-async def start_onboarding(message: Message, state: FSMContext) -> None:
-    """Запускает анкету с шага 1 в чате ``message`` (данные прежней анкеты в FSM сбрасываются)."""
-    await state.set_state(Onboarding.sex)
-    await state.set_data({})
-    await message.answer(texts.ASK_SEX, reply_markup=keyboards.sex())
+def profile_example(today: date) -> str:
+    return texts.PROFILE_EXAMPLE.format(max_year=today.year - MIN_AGE)
+
+
+def _confirm_text(data: dict[str, Any]) -> str:
+    age = data["age"]
+    return texts.PROFILE_CONFIRM.format(
+        sex=texts.SEX_NOUNS[data["sex"]],
+        age=age,
+        age_word=texts.plural(age, *texts.YEAR_WORDS),
+        height=format_num(data["height"]),
+        weight=format_num(data["weight"], 1),
+    )
+
+
+async def start_profile_flow(message: Message, state: FSMContext, parsed: ParsedProfile) -> None:
+    """Показывает разобранную строку профиля и спрашивает «верно?» (прежние данные FSM сбрасываются)."""
+    data = {"sex": parsed.sex, "age": parsed.age, "height": parsed.height_cm, "weight": parsed.weight_kg}
+    await state.set_state(ProfileFlow.confirm)
+    await state.set_data(data)
+    await message.answer(_confirm_text(data), reply_markup=keyboards.profile_confirm())
+
+
+async def handle_profile_text(message: Message, state: FSMContext, deps: Deps) -> bool:
+    """Строка профиля → подтверждение; похожая, но неразборчивая → пример с диапазонами.
+
+    ``True``, если текст был профилем или «partial» (ответ отправлен), иначе ``False``.
+    """
+    today = to_local(deps.clock()).date()
+    parsed = parse_profile_line(message.text or "", today)
+    if parsed is None:
+        return False
+    if parsed == "partial":
+        await message.answer(profile_example(today))
+        return True
+    await start_profile_flow(message, state, parsed)
+    return True
+
+
+async def ask_profile_line(message: Message, state: FSMContext, text: str = texts.PROFILE_ASK) -> None:
+    """Просит прислать строку профиля (шаги сбрасываются: строку ловит обработчик вне состояний)."""
+    await state.clear()
+    await message.answer(text)
 
 
 async def start_goal_step(message: Message, state: FSMContext, user: User, weight_kg: float | None = None) -> None:
-    """Запускает анкету с шага 6 (только цель и желаемый вес) для пользователя с профилем."""
+    """Запускает шаг цели (цель и желаемый вес) для пользователя с профилем."""
     p = user.profile
     if p is None:
-        await start_onboarding(message, state)
+        await state.clear()
+        await message.answer(texts.PROFILE_HINT)
         return
-    await state.set_state(Onboarding.goal)
+    await state.set_state(ProfileFlow.goal)
     await state.set_data(
         {
             "goal_only": True,
@@ -161,18 +203,15 @@ async def _complete(message: Message, state: FSMContext, deps: Deps, user_id: in
 # --- шаги с кнопками ---
 
 
-async def _reask(message: Message, question: str, markup: InlineKeyboardMarkup) -> None:
-    await message.answer(f"{texts.USE_BUTTONS}\n\n{question}", reply_markup=markup)
-
-
-async def on_sex(callback: CallbackQuery, state: FSMContext) -> None:
+async def on_profile_yes(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    value = callback.data.removeprefix(keyboards.CB_SEX)
-    if value not in ("male", "female"):
-        return
-    await state.update_data(sex=value)
-    await state.set_state(Onboarding.age)
-    await callback.message.answer(texts.ASK_AGE)
+    await state.set_state(ProfileFlow.activity)
+    await callback.message.answer(texts.ASK_ACTIVITY, reply_markup=keyboards.activity())
+
+
+async def on_profile_no(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await ask_profile_line(callback.message, state, texts.PROFILE_RESEND)
 
 
 async def on_activity(callback: CallbackQuery, state: FSMContext) -> None:
@@ -181,7 +220,7 @@ async def on_activity(callback: CallbackQuery, state: FSMContext) -> None:
     if value not in texts.ACTIVITY_LABELS:
         return
     await state.update_data(activity=value)
-    await state.set_state(Onboarding.goal)
+    await state.set_state(ProfileFlow.goal)
     await callback.message.answer(texts.ASK_GOAL, reply_markup=keyboards.goal())
 
 
@@ -198,57 +237,32 @@ async def on_goal(callback: CallbackQuery, state: FSMContext, deps: Deps) -> Non
     if goal == "maintain":
         await _complete(callback.message, state, deps, callback.from_user.id, None)
         return
-    await state.set_state(Onboarding.target)
+    await state.set_state(ProfileFlow.target)
     await callback.message.answer(texts.ASK_TARGET)
 
 
-async def reask_sex(message: Message) -> None:
-    await _reask(message, texts.ASK_SEX, keyboards.sex())
+async def _reask(message: Message, question: str, markup: InlineKeyboardMarkup) -> None:
+    await message.answer(f"{texts.USE_BUTTONS}\n\n{question}", reply_markup=markup)
 
 
-async def reask_activity(message: Message) -> None:
-    await _reask(message, texts.ASK_ACTIVITY, keyboards.activity())
+async def on_button_step_message(message: Message, state: FSMContext, deps: Deps) -> None:
+    """Сообщение вместо кнопки: новая строка профиля начинает подтверждение заново, иначе — повтор вопроса."""
+    if message.text and await handle_profile_text(message, state, deps):
+        return
+    current = await state.get_state()
+    if current == ProfileFlow.confirm.state:
+        await _reask(message, _confirm_text(await state.get_data()), keyboards.profile_confirm())
+    elif current == ProfileFlow.activity.state:
+        await _reask(message, texts.ASK_ACTIVITY, keyboards.activity())
+    else:
+        await _reask(message, texts.ASK_GOAL, keyboards.goal())
 
 
-async def reask_goal(message: Message) -> None:
-    await _reask(message, texts.ASK_GOAL, keyboards.goal())
-
-
-# --- шаги с числами ---
+# --- желаемый вес ---
 
 
 def _number(message: Message, bounds: tuple[float, float]) -> float | None:
     return parse_number(message.text or "", *bounds)
-
-
-async def on_age(message: Message, state: FSMContext) -> None:
-    value = _number(message, AGE_RANGE)
-    if value is None or value != int(value):
-        await message.answer(texts.BAD_AGE)
-        return
-    await state.update_data(age=int(value))
-    await state.set_state(Onboarding.height)
-    await message.answer(texts.ASK_HEIGHT)
-
-
-async def on_height(message: Message, state: FSMContext) -> None:
-    value = _number(message, HEIGHT_RANGE)
-    if value is None:
-        await message.answer(texts.BAD_HEIGHT)
-        return
-    await state.update_data(height=value)
-    await state.set_state(Onboarding.weight)
-    await message.answer(texts.ASK_WEIGHT)
-
-
-async def on_weight(message: Message, state: FSMContext) -> None:
-    value = _number(message, WEIGHT_RANGE)
-    if value is None:
-        await message.answer(texts.BAD_WEIGHT)
-        return
-    await state.update_data(weight=value)
-    await state.set_state(Onboarding.activity)
-    await message.answer(texts.ASK_ACTIVITY, reply_markup=keyboards.activity())
 
 
 async def on_target(message: Message, state: FSMContext, deps: Deps) -> None:
@@ -289,9 +303,7 @@ async def on_bmi_ok(callback: CallbackQuery, state: FSMContext, deps: Deps) -> N
     await _complete(callback.message, state, deps, callback.from_user.id, target)
 
 
-# --- выход из повторной анкеты ---
-
-MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
+# --- выход из шагов профиля ---
 
 
 def _is_escape(message: Message) -> bool:
@@ -301,15 +313,15 @@ def _is_escape(message: Message) -> bool:
     return doc is not None and (doc.mime_type or "").startswith("image/")
 
 
-async def stay_in_onboarding(message: Message, state: FSMContext, raw_state: str | None, deps: Deps) -> bool:
-    """Фильтр роутера анкеты. Повторная анкета («Новая цель», «Пройти заново»): кнопка меню или
-    фото сбрасывают состояние, и сообщение уходит к следующим роутерам — как ``leave_weight_input``.
+async def stay_in_profile_flow(message: Message, state: FSMContext, raw_state: str | None, deps: Deps) -> bool:
+    """Фильтр роутера. У кого профиль уже есть (повторная строка, «Изменить цель»), кнопка меню
+    или фото сбрасывают шаги, и сообщение уходит к следующим роутерам — как ``leave_weight_input``.
 
     Фильтр стоит на уровне роутера, а не обработчика: ``raw_state`` в данных апдейта не меняется
-    после ``state.clear()``, и шаги анкеты ниже в том же роутере всё равно поймали бы сообщение.
-    Первую анкету (профиля ещё нет) так не покинуть.
+    после ``state.clear()``, и шаги ниже в том же роутере всё равно поймали бы сообщение.
+    Первый расчёт (профиля ещё нет) так не покинуть: вопрос повторяется.
     """
-    if raw_state not in Onboarding or not _is_escape(message):
+    if raw_state not in ProfileFlow or not _is_escape(message):
         return True
     user = await deps.storage.get_user(message.from_user.id)
     if user is None or user.profile is None:
@@ -318,20 +330,29 @@ async def stay_in_onboarding(message: Message, state: FSMContext, raw_state: str
     return False
 
 
+async def on_profile_text(message: Message, state: FSMContext, deps: Deps) -> None:
+    """Временный обработчик текста вне состояний (Task 8 заменит его маршрутизатором текста)."""
+    if not await handle_profile_text(message, state, deps):
+        raise SkipHandler
+
+
 def build_router() -> Router:
     r = Router(name="onboarding")
-    r.message.filter(stay_in_onboarding)
-    r.callback_query.register(on_sex, StateFilter(Onboarding.sex), F.data.startswith(keyboards.CB_SEX))
-    r.callback_query.register(on_activity, StateFilter(Onboarding.activity), F.data.startswith(keyboards.CB_ACT))
-    r.callback_query.register(on_goal, StateFilter(Onboarding.goal), F.data.startswith(keyboards.CB_GOAL))
-    r.callback_query.register(on_bmi_retry, StateFilter(Onboarding.target), F.data == keyboards.CB_BMI_RETRY)
-    r.callback_query.register(on_bmi_ok, StateFilter(Onboarding.target), F.data == keyboards.CB_BMI_OK)
-    # Любое сообщение на шаге анкеты остаётся в анкете: на шаге с кнопками — повтор вопроса.
-    r.message.register(reask_sex, StateFilter(Onboarding.sex))
-    r.message.register(on_age, StateFilter(Onboarding.age))
-    r.message.register(on_height, StateFilter(Onboarding.height))
-    r.message.register(on_weight, StateFilter(Onboarding.weight))
-    r.message.register(reask_activity, StateFilter(Onboarding.activity))
-    r.message.register(reask_goal, StateFilter(Onboarding.goal))
-    r.message.register(on_target, StateFilter(Onboarding.target))
+    r.message.filter(stay_in_profile_flow)
+    r.callback_query.register(on_profile_yes, StateFilter(ProfileFlow.confirm), F.data == keyboards.CB_PROFILE_YES)
+    r.callback_query.register(on_profile_no, StateFilter(ProfileFlow.confirm), F.data == keyboards.CB_PROFILE_NO)
+    r.callback_query.register(on_activity, StateFilter(ProfileFlow.activity), F.data.startswith(keyboards.CB_ACT))
+    r.callback_query.register(on_goal, StateFilter(ProfileFlow.goal), F.data.startswith(keyboards.CB_GOAL))
+    r.callback_query.register(on_bmi_retry, StateFilter(ProfileFlow.target), F.data == keyboards.CB_BMI_RETRY)
+    r.callback_query.register(on_bmi_ok, StateFilter(ProfileFlow.target), F.data == keyboards.CB_BMI_OK)
+    # Любое сообщение на шаге с кнопками остаётся в шагах: строка профиля или повтор вопроса.
+    r.message.register(
+        on_button_step_message, StateFilter(ProfileFlow.confirm, ProfileFlow.activity, ProfileFlow.goal)
+    )
+    r.message.register(on_target, StateFilter(ProfileFlow.target))
+    r.message.register(
+        on_profile_text,
+        StateFilter(None),
+        F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_TEXTS),
+    )
     return r
