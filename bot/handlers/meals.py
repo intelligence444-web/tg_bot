@@ -365,7 +365,7 @@ async def on_type_menu(callback: CallbackQuery, deps: Deps) -> None:
     if await _load(callback, deps, meal_id) is None:
         return
     await callback.answer(texts.ASK_MEAL_TYPE)
-    markup = keyboards.meal_types(meal_id)
+    markup = keyboards.meal_types(meal_id, topic=_shown_topic(callback))
     if isinstance(callback.message, Message):
         try:
             await callback.message.edit_reply_markup(reply_markup=markup)

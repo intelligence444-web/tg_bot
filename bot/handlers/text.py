@@ -47,6 +47,8 @@ WEEK_DAYS = 7
 IN_NORM = 0.10  # день «в норме» — ±10% от нормы
 MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
 _TAG = re.compile(r"<[^>]+>")
+# Строка перед текстом кнопки темы: рассказ, а не еда, активность или рацион.
+TOPIC_INSTRUCTION = "Это тема для короткого рассказа, ответь видом chat."
 
 
 # --- справка ---
@@ -230,21 +232,23 @@ async def handle_text(
     *,
     prefix: str = "",
     user_id: int | None = None,
-    question: bool = False,
+    topic: str | None = None,
+    ai_taken: bool = False,
 ) -> None:
     """Текст пользователя (набранный или распознанный голос) по порядку v1.1 6.
 
     ``prefix`` — простой текст (не HTML) первой строкой ответа, например «🎙 Понял так: …»;
     для ответов в HTML он экранируется здесь. ``user_id`` — когда ``message`` не от пользователя
-    (сообщение бота под нажатой кнопкой). ``question=True`` — заведомо вопрос (кнопка темы):
-    без шаблонов кодом, а еда и активность из ответа модели не записываются.
+    (сообщение бота под нажатой кнопкой). ``topic`` — нажата кнопка темы: без шаблонов кодом,
+    модель просят ответить видом chat; любой другой ответ ничего не записывает, а пользователь
+    получает ``texts.TOPIC_FALLBACK``. ``ai_taken`` — единица лимита уже списана вызывающим.
     """
     if user_id is None:
         user_id = message.from_user.id
     text = text.strip()
 
     # 1. Шаблоны кодом — без ИИ и без лимита.
-    if not question:
+    if topic is None:
         if await handle_profile_text(message, state, deps, text):
             return
         kg = parse_weight_text(text)
@@ -259,7 +263,7 @@ async def handle_text(
     # 2. Лимит ИИ: единица тратится до вызова модели.
     now = deps.clock()
     today = to_local(now).date()
-    if not await take_ai(deps.storage, user_id, today, deps.ai_limit):
+    if not ai_taken and not await take_ai(deps.storage, user_id, today, deps.ai_limit):
         log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
         await _send_plain(message, texts.AI_LIMIT, prefix)
         return
@@ -268,18 +272,23 @@ async def handle_text(
     ctx = await build_day_context(deps, user, now)
     history = await deps.storage.recent_chat(user_id, now)
     messages = [{"role": m.role, "content": m.text} for m in history]
-    current = f"{assistant.build_context_text(ctx)}\n\nСообщение пользователя: {text}"
+    current = f"{assistant.build_context_text(ctx)}\n\n"
+    if topic is not None:
+        current += f"{TOPIC_INSTRUCTION}\n"
+    current += f"Сообщение пользователя: {text}"
     messages.append({"role": "user", "content": current})
     norm = None
     if ctx.norm_kcal is not None and ctx.norm_protein is not None:
         norm = (ctx.norm_kcal, ctx.norm_protein)
+    # Тема: рацион не нужен — без проверки и повтора рациона (один запрос к модели).
+    check_norm = None if topic is not None else norm
 
     await _typing(message)
     client = deps.chat or deps.vision
     try:
         try:
             async with asyncio.timeout(VISION_BUDGET_S):
-                outcome = await _route(client, messages, norm)
+                outcome = await _route(client, messages, check_norm)
         except TimeoutError as e:
             raise VisionUnavailable("router time budget exceeded", no_credits=False) from e
     except VisionError as e:
@@ -294,13 +303,13 @@ async def handle_text(
         return
 
     routed = outcome.routed
+    if topic is not None:
+        await _reply_topic(message, deps, user_id, routed, text, topic, prefix)
+        return
     if routed is None:
         await _send_plain(message, texts.NOT_UNDERSTOOD, prefix)
         return
     log.info("text routed: %s", routed.kind, extra={"user_id": user_id})
-    if question and routed.kind in ("food", "activity"):
-        await _send_plain(message, texts.NOT_UNDERSTOOD, prefix)
-        return
 
     if routed.kind == "food":
         if not _is_food(routed.analysis):
@@ -325,6 +334,22 @@ async def handle_text(
         return
     await _send_html(message, parts, prefix)
     await _save_pair(deps, user_id, text, routed.reply)
+
+
+async def _reply_topic(
+    message: Message, deps: Deps, user_id: int, routed: Routed | None, question: str, topic: str, prefix: str
+) -> None:
+    """Ответ на тему — только рассказ (chat или unclear с текстом); иначе ничего не пишем
+    и предлагаем спросить своими словами."""
+    log.info("topic routed: %s", routed.kind if routed else "bad_response", extra={"user_id": user_id})
+    parts: list[str] = []
+    if routed is not None and routed.kind in ("chat", "unclear") and routed.reply.strip():
+        parts = assistant.to_telegram_html(routed.reply)
+    if not parts:
+        await _send_plain(message, texts.TOPIC_FALLBACK.format(topic=topic), prefix)
+        return
+    await _send_html(message, parts, prefix)
+    await _save_pair(deps, user_id, question, routed.reply)
 
 
 async def _reply_plan(
@@ -376,7 +401,11 @@ async def on_text(message: Message, state: FSMContext, deps: Deps) -> None:
 
 
 async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
-    """Кнопка «💡 <тема>»: вопрос собеседнику, одна единица лимита (её тратит ``handle_text``)."""
+    """Кнопка «💡 <тема>»: вопрос собеседнику, ровно одна единица лимита.
+
+    Лимит проверяется первым: исчерпан — кнопка и номер темы не меняются, ответ ``AI_LIMIT``.
+    Единицу списывает этот обработчик, ``handle_text`` её не трогает (``ai_taken=True``).
+    """
     n = keyboards.parse_topic(callback.data)
     await callback.answer()
     if n is None or not isinstance(callback.message, Message):
@@ -384,6 +413,10 @@ async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> No
     user_id = callback.from_user.id
     user = await deps.storage.get_user(user_id)
     if user is None:
+        return
+    if not await take_ai(deps.storage, user_id, to_local(deps.clock()).date(), deps.ai_limit):
+        log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
+        await callback.message.answer(texts.AI_LIMIT)
         return
     if user.next_topic <= n:
         user.next_topic = n + 1
@@ -397,7 +430,13 @@ async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> No
             pass  # не изменилось или сообщение старое — ответ всё равно придёт
     topic = texts.TOPICS[n % len(texts.TOPICS)]
     await handle_text(
-        callback.message, state, deps, texts.TOPIC_QUESTION.format(topic=topic), user_id=user_id, question=True
+        callback.message,
+        state,
+        deps,
+        texts.TOPIC_QUESTION.format(topic=topic),
+        user_id=user_id,
+        topic=topic,
+        ai_taken=True,
     )
 
 

@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -27,6 +29,9 @@ WEIGH_STALE = timedelta(days=7)
 MONDAY = 0
 STREAK_LOOKBACK = timedelta(days=60)
 CHAT_TIMEOUT_S = 45.0  # как VISION_TIMEOUT_S в bot.main
+ADVICE_TOTAL_BUDGET_S = 300.0  # общий срок на советы за запуск; дальше отчёты без совета
+ADVICE_CONCURRENCY = 5  # советов одновременно
+REPORT_WORKERS = 10  # отчётов готовится одновременно (чтение базы и совет)
 
 
 class _Blocked(Exception):
@@ -56,73 +61,122 @@ async def _fresh(storage: Storage, user_id: int) -> User | None:
     return user
 
 
-async def _weekly_report(
-    storage: Storage, bot: Bot, user_id: int, today: date, chat: VisionClient | None, counts: dict[str, int]
-) -> None:
-    """Отчёт за прошлую неделю: профиль, советы включены, ≥ 3 дней с записями еды."""
-    user = await _fresh(storage, user_id)
-    if user is None or user.profile is None or user.norm is None:
-        return
-    start, end = weekly.week_bounds(today)
-    meals = await storage.meals_between(user_id, start, end)
-    if len({m.local_date for m in meals}) < weekly.MIN_DAYS:
-        return
-    stats = weekly.compute_week(
-        meals,
-        await storage.activities_between(user_id, start, end),
-        await storage.weights(user_id),
-        lambda day: effective_norm(user, day).kcal,
-        start,
-        today,
-        meal_days=await storage.meal_days(user_id, today - STREAK_LOOKBACK),
-    )
-    advice = await weekly.weekly_advice(chat, stats, user.profile) if chat is not None else None
-    # Совет идёт до минуты: /stop_tips за это время тоже учитываем.
-    user = await _fresh(storage, user_id)
-    if user is not None and await _send(bot, user, weekly.format_weekly(stats, advice)):
-        counts["reports"] += 1
+async def _deactivate(storage: Storage, user_id: int, counts: dict[str, int]) -> None:
+    log.info("user blocked the bot", extra={"user_id": user_id, "error_kind": "forbidden"})
+    user = await storage.get_user(user_id)
+    if user is not None:
+        user.is_active = False
+        await storage.save_user(user)
+    counts["deactivated"] += 1
 
 
-async def _process(
-    storage: Storage,
-    bot: Bot,
-    user_id: int,
-    today: date,
-    counts: dict[str, int],
-    chat: VisionClient | None = None,
-) -> None:
-    user = await _fresh(storage, user_id)
-    try:
-        if user is None:
+@dataclass
+class _Run:
+    storage: Storage
+    bot: Bot
+    today: date
+    chat: VisionClient | None
+    counts: dict[str, int]
+    advice_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(ADVICE_CONCURRENCY))
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    advice_deadline: float = 0.0  # время цикла событий, после которого советы не запрашиваются
+
+    async def isolated(self, user_id: int, step: Callable[[int], Awaitable[None]]) -> None:
+        """Шаг рассылки для одного пользователя: 403 — деактивация, любая другая ошибка — в журнал."""
+        try:
+            try:
+                await step(user_id)
+            except _Blocked:
+                await _deactivate(self.storage, user_id, self.counts)
+        except Exception:
+            log.exception("daily failed for user", extra={"user_id": user_id, "error_kind": "daily"})
+
+    async def reminder(self, user_id: int) -> None:
+        """Напоминание о взвешивании: последнее взвешивание старше 7 дней, сегодня ещё не слали."""
+        user = await _fresh(self.storage, user_id)
+        if user is None or user.last_weigh_reminder_date == self.today:
             return
-        if today.weekday() == MONDAY:
-            weighings = await storage.weights(user_id)
-            if not weighings or weighings[-1].day < today - WEIGH_STALE:
-                user = await _fresh(storage, user_id)
-                if user is not None and await _send(bot, user, texts.WEIGH_REMINDER):
-                    counts["reminders"] += 1
-            await _weekly_report(storage, bot, user_id, today, chat, counts)
-    except _Blocked:
-        log.info("user blocked the bot", extra={"user_id": user_id, "error_kind": "forbidden"})
-        user = await storage.get_user(user_id)
+        weighings = await self.storage.weights(user_id)
+        if weighings and weighings[-1].day >= self.today - WEIGH_STALE:
+            return
+        if await _send(self.bot, user, texts.WEIGH_REMINDER):
+            self.counts["reminders"] += 1
+            await self._mark(user_id, "last_weigh_reminder_date")
+
+    async def report(self, user_id: int) -> None:
+        """Отчёт за прошлую неделю: профиль, советы включены, ≥ 3 дней с записями еды."""
+        user = await _fresh(self.storage, user_id)
+        if user is None or user.profile is None or user.norm is None or user.last_report_date == self.today:
+            return
+        start, end = weekly.week_bounds(self.today)
+        meals = await self.storage.meals_between(user_id, start, end)
+        if len({m.local_date for m in meals}) < weekly.MIN_DAYS:
+            return
+        stats = weekly.compute_week(
+            meals,
+            await self.storage.activities_between(user_id, start, end),
+            await self.storage.weights(user_id),
+            lambda day: effective_norm(user, day).kcal,
+            start,
+            self.today,
+            meal_days=await self.storage.meal_days(user_id, self.today - STREAK_LOOKBACK),
+        )
+        advice = await self._advice(stats, user)
+        async with self.send_lock:  # отчёты готовятся параллельно, а уходят по одному (лимит Telegram)
+            # Совет идёт до минуты: /stop_tips за это время тоже учитываем.
+            user = await _fresh(self.storage, user_id)
+            if user is None or user.last_report_date == self.today:
+                return
+            if await _send(self.bot, user, weekly.format_weekly(stats, advice)):
+                self.counts["reports"] += 1
+                await self._mark(user_id, "last_report_date")
+
+    async def _advice(self, stats: weekly.WeekStats, user: User) -> str | None:
+        if self.chat is None:
+            return None
+        loop = asyncio.get_running_loop()
+        async with self.advice_slots:
+            left = self.advice_deadline - loop.time()
+            if left <= 0:
+                return None  # общий бюджет на советы исчерпан — отчёт без совета
+            return await weekly.weekly_advice(self.chat, stats, user.profile, timeout=min(weekly.ADVICE_TIMEOUT_S, left))
+
+    async def _mark(self, user_id: int, field_name: str) -> None:
+        """Дата отправки — чтобы повторный запуск daily в тот же день не слал снова."""
+        user = await self.storage.get_user(user_id)
         if user is not None:
-            user.is_active = False
-            await storage.save_user(user)
-        counts["deactivated"] += 1
+            setattr(user, field_name, self.today)
+            await self.storage.save_user(user)
 
 
 async def run_daily(
     storage: Storage, bot: Bot, now: datetime, chat: VisionClient | None = None
 ) -> dict[str, int]:
-    """``chat`` — клиент для совета в недельном отчёте; None — отчёт без совета."""
+    """Рассылки дня. В понедельник сначала все напоминания о взвешивании, затем отчёты.
+
+    ``chat`` — клиент совета в недельном отчёте (None — без совета). Советы запрашиваются
+    не больше ``ADVICE_CONCURRENCY`` одновременно и в пределах ``ADVICE_TOTAL_BUDGET_S`` секунд
+    от начала отчётов; дальше отчёты уходят без совета. Лимит ИИ пользователей не тратится.
+    """
     today = to_local(now).date()
     counts = {"reminders": 0, "deactivated": 0, "reports": 0}
-    for candidate in await storage.daily_users():
-        uid = candidate.user_id
-        try:
-            await _process(storage, bot, uid, today, counts, chat)
-        except Exception:
-            log.exception("daily failed for user", extra={"user_id": uid, "error_kind": "daily"})
+    if today.weekday() != MONDAY:
+        return counts
+    run = _Run(storage, bot, today, chat, counts)
+    user_ids = [u.user_id for u in await storage.daily_users()]
+    for uid in user_ids:
+        await run.isolated(uid, run.reminder)
+
+    run.advice_deadline = asyncio.get_running_loop().time() + ADVICE_TOTAL_BUDGET_S
+    queue: asyncio.Queue[int] = asyncio.Queue()
+    for uid in user_ids:
+        queue.put_nowait(uid)
+
+    async def worker() -> None:
+        while not queue.empty():
+            await run.isolated(queue.get_nowait(), run.report)
+
+    await asyncio.gather(*(worker() for _ in range(REPORT_WORKERS)))
     return counts
 
 

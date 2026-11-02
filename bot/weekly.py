@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from bot import texts
 from bot.calc import format_num
 from bot.models import Activity, Meal, Profile, Weighing
-from bot.progress import streak, trend_weight
+from bot.progress import streak
 from bot.vision import VisionClient
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,8 @@ ADVICE_SYSTEM = (
     "текстом без Markdown и без эмодзи. Обращайся на «ты», тепло и по-дружески. Посыл бота — "
     "питание под цель без запретов и без голода: не запрещай, не упрекай и не стыди, предложи "
     "один мягкий конкретный шаг. Не используй слова «нельзя», «запрещено», «сорвался», «плохо». "
-    "Цифры бери только из сообщения, норму не пересчитывай. Не ставь диагнозов, не советуй "
+    "Цифры бери только из сообщения, норму не пересчитывай. Не советуй есть меньше нормы; если "
+    "человек недоедает — мягко предложи добрать до нормы, лучше белком. Не ставь диагнозов, не советуй "
     "лекарства и БАДы. Ответь только текстом совета."
 )
 
@@ -48,6 +49,7 @@ class WeekStats:
     activity_credit: float
     week_change_kg: float | None
     streak: int
+    avg_norm: float | None = None  # средняя норма (с активностью) за дни с записями
 
 
 def week_bounds(today: date) -> tuple[date, date]:
@@ -90,16 +92,22 @@ def compute_week(
 
     days = len(by_day)
     in_norm = 0
+    norms: list[float] = []
     for day, (kcal, _) in by_day.items():
         norm = norm_on(day)
+        norms.append(norm)
         if norm > 0 and abs(kcal - norm) <= IN_NORM * norm:
             in_norm += 1
 
+    # Вес: среднее взвешиваний недели минус среднее взвешиваний предыдущей недели — только если
+    # в каждом из двух окон есть своё взвешивание (без подстановки более старого веса).
+    this_week = [w.weight_kg for w in weighings if week_start <= w.day <= week_end]
+    prev_week = [
+        w.weight_kg for w in weighings if week_start - timedelta(days=7) <= w.day < week_start
+    ]
     change = None
-    end_trend = trend_weight(weighings, week_end)
-    before = trend_weight(weighings, week_start - timedelta(days=1))
-    if end_trend is not None and before is not None:
-        change = end_trend - before
+    if this_week and prev_week:
+        change = sum(this_week) / len(this_week) - sum(prev_week) / len(prev_week)
 
     all_days = meal_days if meal_days is not None else {m.local_date for m in meals}
     return WeekStats(
@@ -110,6 +118,7 @@ def compute_week(
         activity_credit=sum(credits.values()),
         week_change_kg=change,
         streak=streak(all_days, today),
+        avg_norm=sum(norms) / days if days else None,
     )
 
 
@@ -149,6 +158,7 @@ def _advice_request(stats: WeekStats, profile: Profile) -> str:
         f"Дней с записями еды: {stats.days_logged} из 7.",
         f"В среднем за день: {format_num(stats.avg_kcal)} ккал, белок {format_num(stats.avg_protein)} г.",
         f"Дней в норме калорий (±10%): {stats.days_in_norm}.",
+        _norm_gap_line(stats),
         f"Активность за неделю: +{format_num(stats.activity_credit)} ккал к норме.",
     ]
     if stats.week_change_kg is not None:
@@ -157,6 +167,18 @@ def _advice_request(stats: WeekStats, profile: Profile) -> str:
         lines.append("Тренд веса за неделю: нет данных.")
     lines.append(f"Серия дней с записями: {stats.streak}.")
     return "\n".join(lines)
+
+
+def _norm_gap_line(stats: WeekStats) -> str:
+    if not stats.avg_norm:
+        return "Средняя норма дня: нет данных."
+    head = f"Средняя норма дня с учётом активности: {format_num(stats.avg_norm)} ккал."
+    gap = stats.avg_kcal - stats.avg_norm
+    pct = format_num(abs(gap) / stats.avg_norm * 100)
+    if format_num(abs(gap)) == "0":
+        return f"{head} В среднем съедено ровно по норме."
+    side = "ниже" if gap < 0 else "выше"
+    return f"{head} В среднем съедено {side} нормы на {format_num(abs(gap))} ккал ({pct}%)."
 
 
 def _clean(raw: str) -> str | None:
@@ -168,11 +190,13 @@ def _clean(raw: str) -> str | None:
     return text
 
 
-async def weekly_advice(chat: VisionClient, stats: WeekStats, profile: Profile) -> str | None:
-    """Один запрос к модели; совет до ``ADVICE_MAX`` знаков. Любая ошибка — None."""
+async def weekly_advice(
+    chat: VisionClient, stats: WeekStats, profile: Profile, *, timeout: float = ADVICE_TIMEOUT_S
+) -> str | None:
+    """Один запрос к модели; совет до ``ADVICE_MAX`` знаков. Ошибка или ``timeout`` — None."""
     messages = [{"role": "user", "content": _advice_request(stats, profile)}]
     try:
-        async with asyncio.timeout(ADVICE_TIMEOUT_S):
+        async with asyncio.timeout(timeout):
             raw = await chat.complete(ADVICE_SYSTEM, messages, ADVICE_MAX_TOKENS)
     except Exception as e:  # сбой модели или сети — отчёт уходит без совета
         log.warning("weekly advice failed: %s", type(e).__name__, extra={"error_kind": "weekly_advice"})

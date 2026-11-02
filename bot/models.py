@@ -140,6 +140,8 @@ class User:
     next_topic: int = 0  # номер следующей темы (с 0)
     last_topic_offer_date: date | None = None
     last_profile_hint_date: date | None = None
+    last_report_date: date | None = None  # недельный отчёт отправлен (повторный запуск daily не шлёт снова)
+    last_weigh_reminder_date: date | None = None  # то же для напоминания о взвешивании
 
 
 @dataclass(frozen=True)

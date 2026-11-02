@@ -36,9 +36,12 @@ def test_deploy_md_contains_every_create_table_verbatim():
 
 def test_deploy_md_contains_users_alter_block():
     statements = users_alter_ddl()
-    assert len(statements) == 4
+    assert len(statements) == 6
     assert "\n".join(statements) in DEPLOY
-    for name in ("first_seen_at Timestamp", "next_topic Int32", "last_topic_offer_date Date", "last_profile_hint_date Date"):
+    for name in (
+        "first_seen_at Timestamp", "next_topic Int32", "last_topic_offer_date Date", "last_profile_hint_date Date",
+        "last_report_date Date", "last_weigh_reminder_date Date",
+    ):
         assert f"ALTER TABLE `users` ADD COLUMN {name};" in DEPLOY
 
 

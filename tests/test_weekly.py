@@ -63,6 +63,23 @@ def test_compute_week():
     assert stats.activity_credit == pytest.approx(400)
     assert stats.week_change_kg == pytest.approx(-1.0)
     assert stats.streak == 6  # 21–25 и сегодня
+    assert stats.avg_norm == pytest.approx((2000 * 4 + 2400) / 5)
+
+
+def test_week_change_uses_only_weighings_inside_both_windows():
+    def change(weighings):
+        return compute_week(DATA_MEALS, [], weighings, 2000.0, WEEK_START, MON).week_change_kg
+
+    # среднее недели 19–25 минус среднее недели 12–18
+    assert change([Weighing(d(12), 72.0), Weighing(d(18), 71.0), Weighing(d(20), 70.5), Weighing(d(25), 69.5)]) == (
+        pytest.approx(70.0 - 71.5)
+    )
+    # на неделе отчёта взвешиваний нет — старое не подставляется
+    assert change([Weighing(d(12), 72.0), Weighing(d(18), 71.0)]) is None
+    # в базовой неделе нет, есть только более старое взвешивание
+    assert change([Weighing(d(5), 72.0), Weighing(d(25), 70.0)]) is None
+    # взвешивание сегодня (после недели) не считается
+    assert change([Weighing(d(18), 71.0), Weighing(d(26), 69.0)]) is None
 
 
 def test_compute_week_norm_per_day_and_meal_days_for_streak():
@@ -80,7 +97,7 @@ def test_compute_week_norm_per_day_and_meal_days_for_streak():
 
 def test_compute_week_empty():
     stats = compute_week([], [], [], 2000.0, WEEK_START, MON)
-    assert stats == WeekStats(0, 0.0, 0.0, 0, 0.0, None, 0)
+    assert stats == WeekStats(0, 0.0, 0.0, 0, 0.0, None, 0, None)
 
 
 STATS = WeekStats(5, 2080.0, 80.0, 3, 400.0, -1.0, 5)
@@ -115,6 +132,25 @@ async def test_weekly_advice_one_call_with_numbers():
     call = chat.completions[0]
     assert "2 080" in call["messages"][-1]["content"]
     assert "нельзя" in call["system"]  # правило тона: не использовать эти слова
+    assert "не советуй есть меньше нормы" in call["system"].lower()
+    assert "добрать до нормы, лучше белком" in call["system"]
+
+
+@pytest.mark.parametrize(
+    ("avg_kcal", "expected"),
+    [
+        (1500.0, "ниже нормы на 500 ккал (25%)"),
+        (2200.0, "выше нормы на 200 ккал (10%)"),
+        (2000.0, "ровно по норме"),
+    ],
+)
+async def test_weekly_advice_reports_average_norm_and_gap(avg_kcal, expected):
+    chat = FakeVision([], texts=["Совет."])
+    stats = WeekStats(5, avg_kcal, 80.0, 3, 0.0, None, 5, avg_norm=2000.0)
+    await weekly_advice(chat, stats, PROFILE)
+    content = chat.completions[0]["messages"][-1]["content"]
+    assert "Средняя норма дня с учётом активности: 2 000 ккал." in content
+    assert expected in content
 
 
 async def test_weekly_advice_cut_to_300():

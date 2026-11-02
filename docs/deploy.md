@@ -160,6 +160,8 @@ CREATE TABLE IF NOT EXISTS `users` (
     next_topic Int32,
     last_topic_offer_date Date,
     last_profile_hint_date Date,
+    last_report_date Date,
+    last_weigh_reminder_date Date,
     updated_at Timestamp,
     PRIMARY KEY (user_id)
 );
@@ -244,6 +246,8 @@ ALTER TABLE `users` ADD COLUMN first_seen_at Timestamp;
 ALTER TABLE `users` ADD COLUMN next_topic Int32;
 ALTER TABLE `users` ADD COLUMN last_topic_offer_date Date;
 ALTER TABLE `users` ADD COLUMN last_profile_hint_date Date;
+ALTER TABLE `users` ADD COLUMN last_report_date Date;
+ALTER TABLE `users` ADD COLUMN last_weigh_reminder_date Date;
 ```
 
 Этот запрос выполняется один раз: повторный запуск сообщит, что колонка уже существует, —

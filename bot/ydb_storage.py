@@ -59,9 +59,18 @@ USERS_COLUMNS: dict[str, T] = {
     "next_topic": T.Int32,
     "last_topic_offer_date": T.Date,
     "last_profile_hint_date": T.Date,
+    "last_report_date": T.Date,
+    "last_weigh_reminder_date": T.Date,
     "updated_at": T.Timestamp,
 }
-USERS_V11_COLUMNS = ("first_seen_at", "next_topic", "last_topic_offer_date", "last_profile_hint_date")
+USERS_V11_COLUMNS = (
+    "first_seen_at",
+    "next_topic",
+    "last_topic_offer_date",
+    "last_profile_hint_date",
+    "last_report_date",
+    "last_weigh_reminder_date",
+)
 MEALS_COLUMNS: dict[str, T] = {
     "user_id": T.Int64,
     "meal_id": T.Utf8,
@@ -192,6 +201,8 @@ def user_to_row(user: User, now: datetime | None = None) -> dict[str, Any]:
         "next_topic": user.next_topic,
         "last_topic_offer_date": user.last_topic_offer_date,
         "last_profile_hint_date": user.last_profile_hint_date,
+        "last_report_date": user.last_report_date,
+        "last_weigh_reminder_date": user.last_weigh_reminder_date,
         "updated_at": _ts_out(now or datetime.now(UTC)),
     }
 
@@ -225,6 +236,8 @@ def user_from_row(row: Mapping[str, Any]) -> User:
         next_topic=0 if next_topic is None else int(next_topic),
         last_topic_offer_date=_date_in(row.get("last_topic_offer_date")),
         last_profile_hint_date=_date_in(row.get("last_profile_hint_date")),
+        last_report_date=_date_in(row.get("last_report_date")),
+        last_weigh_reminder_date=_date_in(row.get("last_weigh_reminder_date")),
     )
 
 

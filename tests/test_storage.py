@@ -38,6 +38,8 @@ def full_user(user_id: int = 1) -> User:
         next_topic=4,
         last_topic_offer_date=date(2026, 10, 22),
         last_profile_hint_date=date(2026, 10, 21),
+        last_report_date=date(2026, 10, 19),
+        last_weigh_reminder_date=date(2026, 10, 12),
     )
 
 
@@ -145,6 +147,7 @@ async def test_user_new_fields_defaults(storage):
     got = await storage.get_user(1)
     assert got.first_seen_at is None and got.next_topic == 0
     assert got.last_topic_offer_date is None and got.last_profile_hint_date is None
+    assert got.last_report_date is None and got.last_weigh_reminder_date is None
 
 
 async def test_activities_on_and_get(storage):

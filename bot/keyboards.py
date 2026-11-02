@@ -87,7 +87,7 @@ def meal_result(meal_id: str, ask_fat: bool, topic: int | None = None) -> Inline
     )
     rows.append([(texts.BTN_MEAL_TYPE, f"{CB_MEAL_TYPE}{meal_id}")])
     if topic is not None:
-        rows.append([(texts.BTN_TOPIC.format(topic=texts.TOPICS[topic % len(texts.TOPICS)]), f"{CB_TOPIC}{topic}")])
+        rows.append(_topic_row(topic))
     return _inline(rows)
 
 
@@ -122,14 +122,20 @@ def activity_result(activity_id: str) -> InlineKeyboardMarkup:
     return _inline([[(texts.BTN_ACTIVITY_DELETE, f"{CB_ACT_DEL}{activity_id}")]])
 
 
-def meal_types(meal_id: str) -> InlineKeyboardMarkup:
+def _topic_row(topic: int) -> list[tuple[str, str]]:
+    return [(texts.BTN_TOPIC.format(topic=texts.TOPICS[topic % len(texts.TOPICS)]), f"{CB_TOPIC}{topic}")]
+
+
+def meal_types(meal_id: str, topic: int | None = None) -> InlineKeyboardMarkup:
+    """Выбор приёма пищи; ``topic`` — кнопка темы остаётся под сообщением."""
     labels = texts.MEAL_LABELS
-    return _inline(
-        [
-            [(labels["breakfast"], f"{CB_MT}{meal_id}:breakfast"), (labels["lunch"], f"{CB_MT}{meal_id}:lunch")],
-            [(labels["snack"], f"{CB_MT}{meal_id}:snack"), (labels["dinner"], f"{CB_MT}{meal_id}:dinner")],
-        ]
-    )
+    rows = [
+        [(labels["breakfast"], f"{CB_MT}{meal_id}:breakfast"), (labels["lunch"], f"{CB_MT}{meal_id}:lunch")],
+        [(labels["snack"], f"{CB_MT}{meal_id}:snack"), (labels["dinner"], f"{CB_MT}{meal_id}:dinner")],
+    ]
+    if topic is not None:
+        rows.append(_topic_row(topic))
+    return _inline(rows)
 
 
 # --- Вес, прогресс, профиль (спец. 6.6–6.9, 9) ---

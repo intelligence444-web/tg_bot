@@ -277,8 +277,9 @@ async def test_storage_error_for_one_user_does_not_abort_run(caplog):
     counts = await run_daily(storage, bot, at_9_msk(MON))
     assert counts == {"reminders": 1, "deactivated": 0, "reports": 0}
     assert {m.chat_id for m in _sent(session)} == {2}
-    [rec] = [r for r in caplog.records if r.name == "bot.daily" and r.exc_info]
-    assert rec.user_id == 1 and rec.error_kind == "daily"
+    recs = [r for r in caplog.records if r.name == "bot.daily" and r.exc_info]
+    assert recs  # по записи на каждый шаг рассылки (напоминание, отчёт)
+    assert all(r.user_id == 1 and r.error_kind == "daily" for r in recs)
 
 
 # --- недельный отчёт (v1.1 10) ---
@@ -424,3 +425,102 @@ async def test_daily_build_chat(monkeypatch, caplog):
         monkeypatch.delenv("CHAT_PRIMARY")
         monkeypatch.delenv("VISION_PRIMARY")
         assert daily.build_chat(http) is None
+
+
+# --- порядок, бюджет, параллельность и повторный запуск ---
+
+
+async def _report_users(storage, ids, *, weighed=True):
+    for uid in ids:
+        await storage.save_user(
+            _user(uid, onboarded=MON - timedelta(days=30), profile=_PROFILE, norm=calculate_norm(_PROFILE))
+        )
+        if weighed:
+            await storage.upsert_weight(uid, MON - timedelta(days=2), 70.0)
+        for i in range(3):
+            m = meal(MON - timedelta(days=7 - i), 1500, 80)
+            m.user_id = uid
+            m.meal_id = f"{uid}-{m.meal_id}"
+            await storage.add_meal(m)
+
+
+async def test_all_reminders_go_before_reports(env):
+    storage, bot, session = env
+    await _report_users(storage, [1, 2], weighed=False)
+    counts = await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет.", "Совет."]))
+    assert counts == {"reminders": 2, "deactivated": 0, "reports": 2}
+    sent = [m.text for m in _sent(session)]
+    assert sent[:2] == [texts.WEIGH_REMINDER, texts.WEIGH_REMINDER]
+    assert all(t.startswith(texts.WEEKLY_TITLE) for t in sent[2:])
+
+
+async def test_rerun_same_day_does_not_resend(env):
+    storage, bot, session = env
+    await _report_users(storage, [1], weighed=False)
+    await run_daily(storage, bot, at_9_msk(MON), FakeVision([], texts=["Совет."]))
+    user = await storage.get_user(1)
+    assert user.last_report_date == MON and user.last_weigh_reminder_date == MON
+    session.clear()
+    chat = FakeVision([], texts=["Совет."])
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts == {"reminders": 0, "deactivated": 0, "reports": 0}
+    assert _sent(session) == [] and chat.completions == []
+
+
+async def test_advice_budget_spent_reports_without_advice(env, monkeypatch):
+    from bot import daily  # noqa: PLC0415
+
+    storage, bot, session = env
+    await _report_users(storage, [1, 2])
+    monkeypatch.setattr(daily, "ADVICE_TOTAL_BUDGET_S", 0.0)
+    chat = FakeVision([], texts=["Совет.", "Совет."])
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts["reports"] == 2
+    assert chat.completions == []
+    assert all("Совет" not in m.text for m in _sent(session))
+
+
+class _SlowChat(FakeVision):
+    def __init__(self, n: int, delay: float):
+        super().__init__([], texts=["Совет."] * n)
+        self.delay = delay
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def complete(self, system, messages, max_tokens=1500):
+        import asyncio  # noqa: PLC0415
+
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().complete(system, messages, max_tokens)
+        finally:
+            self.in_flight -= 1
+
+
+async def test_advice_runs_with_limited_concurrency(env, monkeypatch):
+    from bot import daily  # noqa: PLC0415
+
+    storage, bot, session = env
+    monkeypatch.setattr(daily, "SEND_PAUSE_S", 0)
+    await _report_users(storage, range(1, 9))
+    chat = _SlowChat(8, 0.05)
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts["reports"] == 8
+    assert chat.max_in_flight == daily.ADVICE_CONCURRENCY == 5
+    assert all("Совет." in m.text for m in _sent(session))
+
+
+async def test_advice_budget_runs_out_mid_run(env, monkeypatch):
+    from bot import daily  # noqa: PLC0415
+
+    storage, bot, session = env
+    monkeypatch.setattr(daily, "SEND_PAUSE_S", 0)
+    monkeypatch.setattr(daily, "ADVICE_TOTAL_BUDGET_S", 0.05)
+    await _report_users(storage, range(1, 9))
+    chat = _SlowChat(8, 0.5)  # дольше бюджета: первые советы обрываются, остальные не запрашиваются
+    counts = await run_daily(storage, bot, at_9_msk(MON), chat)
+    assert counts["reports"] == 8
+    assert chat.max_in_flight <= 5 and chat.completions == []  # оборваны по сроку
+    assert all("Совет" not in m.text for m in _sent(session))

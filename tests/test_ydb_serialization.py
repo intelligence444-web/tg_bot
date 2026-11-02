@@ -150,6 +150,8 @@ NEW_USER_COLUMNS = {
     "next_topic": "Int32",
     "last_topic_offer_date": "Date",
     "last_profile_hint_date": "Date",
+    "last_report_date": "Date",
+    "last_weigh_reminder_date": "Date",
 }
 
 
@@ -164,6 +166,7 @@ def test_user_new_fields_in_schema_and_roundtrip():
     assert (back.next_topic, back.last_topic_offer_date, back.last_profile_hint_date) == (
         4, date(2026, 10, 22), date(2026, 10, 21)
     )
+    assert (back.last_report_date, back.last_weigh_reminder_date) == (date(2026, 10, 19), date(2026, 10, 12))
 
 
 def test_user_row_without_new_columns_reads_defaults():
