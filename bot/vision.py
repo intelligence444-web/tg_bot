@@ -23,6 +23,7 @@ MAX_GRAMS = 3000
 MAX_KCAL = 5000
 TIMEOUT_S = 45.0
 MAX_SIDE = 1280
+MAX_COMMENT = 150
 MAX_PIXELS = 40_000_000  # больше — считаем «бомбой» и не разжимаем
 
 
@@ -53,8 +54,27 @@ class VisionClient(Protocol):
 
     async def correct(self, previous: Analysis, text: str) -> Analysis: ...
 
+    async def complete(
+        self, system: str, messages: list[dict[str, str]], max_tokens: int = 1500
+    ) -> str: ...
 
-SYSTEM_PROMPT = """Ты — нутрициолог, который оценивает калорийность еды по фото тарелки.
+
+ANALYSIS_SCHEMA = """Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. Схема:
+{
+  "is_food": true,
+  "confidence": "high | medium | low",
+  "items": [
+    {"name": "Вермишель отварная", "grams": 200, "kcal": 230, "protein": 7.0, "fat": 1.0, "carbs": 46.0, "hidden": false, "category": "side"},
+    {"name": "Масло в гарнире", "grams": 10, "kcal": 75, "protein": 0.1, "fat": 8.3, "carbs": 0.1, "hidden": true, "category": "fat", "fat_type": "сливочное"}
+  ],
+  "ask_about_fat": true,
+  "comment": "Белка маловато — добавь творог или яйцо."
+}
+Поля "fat_type" и "comment" необязательные, остальные поля обязательны.
+Допустимые категории: main, side, vegetable, fruit, sweet, drink, sauce, fat, other.
+"""
+
+SYSTEM_PROMPT = f"""Ты — нутрициолог, который оценивает калорийность еды по фото тарелки.
 
 Правила:
 1. Определи все блюда и продукты на фото, оцени вес каждой позиции в граммах и её КБЖУ (ккал, белки, жиры, углеводы в граммах) для этого веса.
@@ -65,19 +85,9 @@ SYSTEM_PROMPT = """Ты — нутрициолог, который оценив�
 6. "confidence": "high", "medium" или "low" — насколько ты уверен в оценке.
 7. Если на фото нет еды, верни "is_food": false и пустой список "items".
 8. Все числа неотрицательные; граммы не больше 3000, ккал на позицию не больше 5000. Названия — по-русски.
+9. "comment" (необязательно): одна короткая фраза до 150 знаков о тарелке — по-доброму, без запретов и упрёков, не больше одного эмодзи. Отметь, чего хватает или не хватает: белок, овощи, сладкое, напитки. Если сказать нечего — пропусти поле.
 
-Отвечай строго одним JSON-объектом, без пояснений, без markdown и без текста до или после. Схема:
-{
-  "is_food": true,
-  "confidence": "high | medium | low",
-  "items": [
-    {"name": "Вермишель отварная", "grams": 200, "kcal": 230, "protein": 7.0, "fat": 1.0, "carbs": 46.0, "hidden": false, "category": "side"},
-    {"name": "Масло в гарнире", "grams": 10, "kcal": 75, "protein": 0.1, "fat": 8.3, "carbs": 0.1, "hidden": true, "category": "fat", "fat_type": "сливочное"}
-  ],
-  "ask_about_fat": true
-}
-Поле "fat_type" необязательное, остальные поля обязательны.
-Допустимые категории: main, side, vegetable, fruit, sweet, drink, sauce, fat, other.
+{ANALYSIS_SCHEMA}
 
 Если вместе с текстом тебе передан предыдущий результат в JSON и поправка пользователя, примени поправку к этому результату, пересчитай значения и верни полный обновлённый JSON той же схемы."""
 
@@ -148,7 +158,9 @@ def parse_analysis(raw: str) -> Analysis:
             )
     except KeyError as e:
         raise BadResponse(f"missing field {e}") from e
-    return Analysis(is_food, confidence, tuple(items), ask)
+    comment = data.get("comment")
+    comment = comment.strip()[:MAX_COMMENT].strip() if isinstance(comment, str) else ""
+    return Analysis(is_food, confidence, tuple(items), ask, comment)
 
 
 # ---------- подготовка картинки ----------
@@ -220,12 +232,9 @@ class KieOpenAIClient:
         self._api_key = api_key
         self._http = http
 
-    async def _chat(self, user_content: Any) -> Analysis:
+    async def _chat_text(self, system: str, messages: list[dict[str, Any]]) -> str:
         body = {
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
+            "messages": [{"role": "system", "content": system}, *messages],
             "stream": False,
         }
         url = f"https://api.kie.ai/{self.model}/v1/chat/completions"
@@ -236,7 +245,18 @@ class KieOpenAIClient:
             raise BadResponse("unexpected response shape") from e
         if not isinstance(content, str):
             raise BadResponse("content is not text")
-        return parse_analysis(content)
+        return content
+
+    async def _chat(self, user_content: Any) -> Analysis:
+        text = await self._chat_text(
+            SYSTEM_PROMPT, [{"role": "user", "content": user_content}]
+        )
+        return parse_analysis(text)
+
+    async def complete(
+        self, system: str, messages: list[dict[str, str]], max_tokens: int = 1500
+    ) -> str:
+        return await self._chat_text(system, messages)
 
     async def analyze(self, image_jpeg: bytes, caption: str | None) -> Analysis:
         return await self._chat(
@@ -257,12 +277,14 @@ class KieClaudeClient:
         self._api_key = api_key
         self._http = http
 
-    async def _messages(self, content: Any) -> Analysis:
+    async def _messages_text(
+        self, system: str, messages: list[dict[str, Any]], max_tokens: int
+    ) -> str:
         body = {
             "model": self.model,
-            "max_tokens": 2000,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
         }
         payload = await _post(
             self._http, "https://api.kie.ai/claude/v1/messages", self._api_key, body
@@ -274,7 +296,18 @@ class KieClaudeClient:
             )
         except (KeyError, TypeError, StopIteration) as e:
             raise BadResponse("unexpected response shape") from e
+        return text
+
+    async def _messages(self, content: Any) -> Analysis:
+        text = await self._messages_text(
+            SYSTEM_PROMPT, [{"role": "user", "content": content}], 2000
+        )
         return parse_analysis(text)
+
+    async def complete(
+        self, system: str, messages: list[dict[str, str]], max_tokens: int = 1500
+    ) -> str:
+        return await self._messages_text(system, messages, max_tokens)
 
     async def analyze(self, image_jpeg: bytes, caption: str | None) -> Analysis:
         return await self._messages(
@@ -297,21 +330,25 @@ class FallbackVision:
         self.primary = primary
         self.fallback = fallback
 
-    async def _attempt(self, client: VisionClient, op: str, args: tuple) -> Analysis:
+    async def _attempt(
+        self, client: VisionClient, op: str, args: tuple, retry_bad: bool = True
+    ) -> Any:
         method = getattr(client, op)
         try:
             return await method(*args)
         except BadResponse:
+            if not retry_bad:
+                raise
             log.warning("vision bad response, retrying", extra={"error_kind": "bad_response"})
             return await method(*args)
 
-    async def _run(self, op: str, *args: Any) -> Analysis:
+    async def _run(self, op: str, *args: Any, retry_bad: bool = True) -> Any:
         no_credits = False
         for client in (self.primary, self.fallback):
             if client is None:
                 continue
             try:
-                return await self._attempt(client, op, args)
+                return await self._attempt(client, op, args, retry_bad)
             except NoCredits:
                 no_credits = True
                 log.warning("vision no credits", extra={"error_kind": "no_credits"})
@@ -324,6 +361,12 @@ class FallbackVision:
 
     async def correct(self, previous: Analysis, text: str) -> Analysis:
         return await self._run("correct", previous, text)
+
+    async def complete(
+        self, system: str, messages: list[dict[str, str]], max_tokens: int = 1500
+    ) -> str:
+        # без повтора на ту же модель: формат текста проверяет вызывающий
+        return await self._run("complete", system, messages, max_tokens, retry_bad=False)
 
 
 def _build_one(spec: str, api_key: str, http: httpx.AsyncClient) -> VisionClient:

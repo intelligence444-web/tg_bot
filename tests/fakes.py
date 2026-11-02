@@ -32,9 +32,13 @@ from bot.models import Analysis
 class FakeVision:
     """Отдаёт заранее заданные результаты по очереди и запоминает вызовы."""
 
-    def __init__(self, results: list[Analysis | Exception]):
+    def __init__(
+        self, results: list[Analysis | Exception], texts: list[str | Exception] | None = None
+    ):
         self._results = list(results)
+        self.texts = list(texts or [])
         self.calls: list[tuple] = []
+        self.completions: list[dict] = []
 
     def _next(self) -> Analysis:
         r = self._results.pop(0)
@@ -49,6 +53,17 @@ class FakeVision:
     async def correct(self, previous: Analysis, text: str) -> Analysis:
         self.calls.append(("correct", previous, text))
         return self._next()
+
+    async def complete(
+        self, system: str, messages: list[dict[str, str]], max_tokens: int = 1500
+    ) -> str:
+        self.completions.append(
+            {"system": system, "messages": list(messages), "max_tokens": max_tokens}
+        )
+        r = self.texts.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
 
 
 # --- Telegram: подменная сессия aiogram, часы и конструкторы апдейтов ---

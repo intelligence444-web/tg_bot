@@ -60,6 +60,7 @@ class Analysis:
     confidence: Literal["high", "medium", "low"]
     items: tuple[FoodItem, ...]
     ask_about_fat: bool
+    comment: str = ""
 
     @property
     def kcal(self) -> float:
@@ -82,7 +83,7 @@ class Analysis:
         old_hidden = [i for i in self.items if i.hidden and i.category == "fat"]
         kept = tuple(i for i in self.items if not (i.hidden and i.category == "fat"))
         if grams == 0:
-            return Analysis(self.is_food, self.confidence, kept, False)
+            return Analysis(self.is_food, self.confidence, kept, False, self.comment)
         fat_type = next((i.fat_type for i in old_hidden if i.fat_type), None)
         butter = fat_type is not None and "сливоч" in fat_type.lower()
         kcal, protein, fat, carbs = _BUTTER_PER_100 if butter else _SUNFLOWER_PER_100
@@ -98,7 +99,7 @@ class Analysis:
             category="fat",
             fat_type=fat_type if butter else "подсолнечное",
         )
-        return Analysis(self.is_food, self.confidence, kept + (oil,), False)
+        return Analysis(self.is_food, self.confidence, kept + (oil,), False, self.comment)
 
 
 @dataclass

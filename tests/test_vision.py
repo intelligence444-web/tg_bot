@@ -346,3 +346,114 @@ def test_prepare_image_restores_pil_cap():
     before = Image.MAX_IMAGE_PIXELS
     prepare_image(buf.getvalue())
     assert Image.MAX_IMAGE_PIXELS == before
+
+
+# ---------- v1.1: comment и complete ----------
+
+def _raw_with(**kw) -> str:
+    return json.dumps({**GOOD, **kw}, ensure_ascii=False)
+
+
+def test_parse_comment_ok_and_default():
+    assert parse_analysis(_raw_with(comment="Овощей хватает.")).comment == "Овощей хватает."
+    assert parse_analysis(GOOD_RAW).comment == ""
+
+
+@pytest.mark.parametrize("bad", [None, 5, ["x"], {"a": 1}, True])
+def test_parse_comment_not_string_is_empty(bad):
+    assert parse_analysis(_raw_with(comment=bad)).comment == ""
+
+
+def test_parse_comment_truncated_to_150():
+    assert len(parse_analysis(_raw_with(comment="я" * 200)).comment) == 150
+
+
+def test_with_fat_keeps_comment():
+    a = parse_analysis(_raw_with(comment="Хорошая тарелка."))
+    assert a.with_fat(0).comment == "Хорошая тарелка."
+    assert a.with_fat(10).comment == "Хорошая тарелка."
+
+
+def test_system_prompt_composes_schema_and_mentions_comment():
+    from bot.vision import ANALYSIS_SCHEMA, SYSTEM_PROMPT
+
+    assert ANALYSIS_SCHEMA in SYSTEM_PROMPT
+    assert '"comment"' in ANALYSIS_SCHEMA and "150" in SYSTEM_PROMPT
+
+
+MSGS = [{"role": "user", "content": "привет"}, {"role": "assistant", "content": "да"},
+        {"role": "user", "content": "ещё"}]
+
+
+async def test_openai_complete():
+    seen = {}
+
+    def handler(req):
+        seen["url"] = str(req.url)
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json=_openai_body("ответ"))
+
+    c = KieOpenAIClient("gemini-3-pro", "KEY", _http(handler))
+    assert await c.complete("СИСТЕМА", MSGS) == "ответ"
+    assert seen["url"] == "https://api.kie.ai/gemini-3-pro/v1/chat/completions"
+    assert seen["body"]["messages"][0] == {"role": "system", "content": "СИСТЕМА"}
+    assert seen["body"]["messages"][1:] == MSGS
+
+
+async def test_openai_complete_402():
+    c = KieOpenAIClient("m", "K", _http(lambda r: httpx.Response(402, json={})))
+    with pytest.raises(NoCredits):
+        await c.complete("s", MSGS)
+
+
+async def test_claude_complete():
+    seen = {}
+
+    def handler(req):
+        seen["url"] = str(req.url)
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"content": [
+            {"type": "thinking", "thinking": "..."}, {"type": "text", "text": "ответ"}]})
+
+    c = KieClaudeClient("claude-sonnet-4-5", "KEY", _http(handler))
+    assert await c.complete("СИСТЕМА", MSGS, max_tokens=700) == "ответ"
+    body = seen["body"]
+    assert seen["url"] == "https://api.kie.ai/claude/v1/messages"
+    assert body["system"] == "СИСТЕМА" and body["messages"] == MSGS
+    assert body["max_tokens"] == 700 and body["model"] == "claude-sonnet-4-5"
+
+
+async def test_claude_complete_default_max_tokens_and_402():
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+    await KieClaudeClient("m", "K", _http(handler)).complete("s", MSGS)
+    assert seen["body"]["max_tokens"] == 1500
+    c2 = KieClaudeClient("m", "K", _http(lambda r: httpx.Response(402, json={})))
+    with pytest.raises(NoCredits):
+        await c2.complete("s", MSGS)
+
+
+async def test_fallback_complete_switches_to_fallback():
+    p = FakeVision([], texts=[VisionError("x")])
+    fb = FakeVision([], texts=["текст"])
+    assert await FallbackVision(p, fb).complete("s", MSGS, 300) == "текст"
+    assert fb.completions == [{"system": "s", "messages": MSGS, "max_tokens": 300}]
+
+
+async def test_fallback_complete_no_retry_on_bad_response():
+    p = FakeVision([], texts=[BadResponse("x")])
+    fb = FakeVision([], texts=["текст"])
+    assert await FallbackVision(p, fb).complete("s", MSGS) == "текст"
+    assert len(p.completions) == 1
+
+
+async def test_fallback_complete_both_no_credits():
+    f = FallbackVision(FakeVision([], texts=[NoCredits("a")]),
+                       FakeVision([], texts=[NoCredits("b")]))
+    with pytest.raises(VisionUnavailable) as e:
+        await f.complete("s", MSGS)
+    assert e.value.no_credits is True
