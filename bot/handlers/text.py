@@ -29,7 +29,7 @@ from bot.diary import to_local
 from bot.handlers.activity import day_norm_kcal, record_steps, record_training
 from bot.handlers.meals import VISION_BUDGET_S, _alert_no_credits, _is_food, record_meal
 from bot.handlers.onboarding import handle_profile_text
-from bot.handlers.weight import ask_profile, load_profile_user, today_for, weighing_reply
+from bot.handlers.weight import load_profile_user, today_for, weighing_reply
 from bot.limits import take_ai
 from bot.models import ChatMessage, User
 from bot.profile_line import parse_steps, parse_weight_text
@@ -47,6 +47,8 @@ WEEK_DAYS = 7
 IN_NORM = 0.10  # день «в норме» — ±10% от нормы
 MENU_TEXTS = (texts.BTN_TODAY, texts.BTN_WEIGH, texts.BTN_PROFILE, texts.BTN_HELP)
 _TAG = re.compile(r"<[^>]+>")
+# Повтор рациона заканчивается раньше общего срока: на ответ первым рационом остаётся запас.
+PLAN_RETRY_MARGIN_S = 2.0
 # Строка перед текстом кнопки темы: рассказ, а не еда, активность или рацион.
 TOPIC_INSTRUCTION = "Это тема для короткого рассказа, ответь видом chat."
 
@@ -186,9 +188,14 @@ class _Outcome:
 
 
 async def _route(
-    client: VisionClient, messages: list[dict[str, str]], norm: tuple[float, float] | None
+    client: VisionClient, messages: list[dict[str, str]], norm: tuple[float, float] | None, deadline: float
 ) -> _Outcome:
-    """Запрос маршрутизатора: неверный формат → один повтор; рацион не сошёлся → один повтор."""
+    """Запрос маршрутизатора: неверный формат → один повтор; рацион не сошёлся → один повтор.
+
+    ``deadline`` — общий срок по часам цикла событий (``loop.time()``). Повтор рациона идёт до
+    ``deadline - PLAN_RETRY_MARGIN_S``; сбой или нехватка времени — показываем первый рацион
+    с пометкой «Суммы примерные…».
+    """
     routed: Routed | None = None
     raw = ""
     for _ in range(2):
@@ -208,9 +215,15 @@ async def _route(
         return _Outcome(routed)
     retry = [*messages, {"role": "assistant", "content": raw}, {"role": "user", "content": problem}]
     try:
-        second = assistant.parse_routed(await client.complete(assistant.SYSTEM_PROMPT, retry))
+        async with asyncio.timeout_at(deadline - PLAN_RETRY_MARGIN_S):
+            raw_retry = await client.complete(assistant.SYSTEM_PROMPT, retry)
+        second = assistant.parse_routed(raw_retry)
     except BadResponse:
         log.warning("plan retry bad response", extra={"error_kind": "bad_response"})
+        second = None
+    except (VisionError, TimeoutError) as e:
+        kind = "timeout" if isinstance(e, TimeoutError) else "vision_unavailable"
+        log.warning("plan retry failed", extra={"error_kind": kind})
         second = None
     if second is None or second.kind != "plan":
         return _Outcome(routed, deviation)
@@ -234,6 +247,7 @@ async def handle_text(
     user_id: int | None = None,
     topic: str | None = None,
     ai_taken: bool = False,
+    budget: float | None = None,
 ) -> None:
     """Текст пользователя (набранный или распознанный голос) по порядку v1.1 6.
 
@@ -242,6 +256,8 @@ async def handle_text(
     (сообщение бота под нажатой кнопкой). ``topic`` — нажата кнопка темы: без шаблонов кодом,
     модель просят ответить видом chat; любой другой ответ ничего не записывает, а пользователь
     получает ``texts.TOPIC_FALLBACK``. ``ai_taken`` — единица лимита уже списана вызывающим.
+    ``budget`` — срок на запрос к модели в секундах (по умолчанию ``VISION_BUDGET_S``; голос
+    передаёт меньше — часть времени ушла на распознавание).
     """
     if user_id is None:
         user_id = message.from_user.id
@@ -249,13 +265,14 @@ async def handle_text(
 
     # 1. Шаблоны кодом — без ИИ и без лимита.
     if topic is None:
-        if await handle_profile_text(message, state, deps, text):
+        if await handle_profile_text(message, state, deps, text, prefix=prefix):
             return
         kg = parse_weight_text(text)
         if kg is not None:
-            await _weigh(message, state, deps, kg)
+            await _weigh(message, state, deps, kg, prefix)
             return
-        steps = parse_steps(text)
+        # «Сколько сжигают 10 000 шагов?» — вопрос, а не запись: решает модель.
+        steps = parse_steps(text) if "?" not in text else None
         if steps is not None:
             await record_steps(message, deps, steps, prefix=prefix)
             return
@@ -285,10 +302,11 @@ async def handle_text(
 
     await _typing(message)
     client = deps.chat or deps.vision
+    deadline = asyncio.get_running_loop().time() + (VISION_BUDGET_S if budget is None else budget)
     try:
         try:
-            async with asyncio.timeout(VISION_BUDGET_S):
-                outcome = await _route(client, messages, check_norm)
+            async with asyncio.timeout_at(deadline):
+                outcome = await _route(client, messages, check_norm, deadline)
         except TimeoutError as e:
             raise VisionUnavailable("router time budget exceeded", no_credits=False) from e
     except VisionError as e:
@@ -372,14 +390,15 @@ async def _reply_plan(
     await _save_pair(deps, user.user_id, question, _plain(formatted))
 
 
-async def _weigh(message: Message, state: FSMContext, deps: Deps, kg: float) -> None:
+async def _weigh(message: Message, state: FSMContext, deps: Deps, kg: float, prefix: str = "") -> None:
     """«85» вне состояний — как кнопка «⚖️» и ввод числа."""
     user = await load_profile_user(deps, message.from_user.id)
     if user is None:
-        await ask_profile(message, state)
+        await state.clear()
+        await _send_plain(message, texts.PROFILE_HINT, prefix)
         return
     reply, markup = await weighing_reply(user, today_for(deps), kg, deps)
-    await message.answer(reply, reply_markup=markup)
+    await message.answer(f"{prefix}\n\n{reply}" if prefix else reply, reply_markup=markup)
 
 
 # --- роутер ---
@@ -403,8 +422,10 @@ async def on_text(message: Message, state: FSMContext, deps: Deps) -> None:
 async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
     """Кнопка «💡 <тема>»: вопрос собеседнику, ровно одна единица лимита.
 
-    Лимит проверяется первым: исчерпан — кнопка и номер темы не меняются, ответ ``AI_LIMIT``.
-    Единицу списывает этот обработчик, ``handle_text`` её не трогает (``ai_taken=True``).
+    Сначала отметка нажатия ``topic:{chat_id}:{message_id}`` (``mark_processed``): повторное
+    нажатие на ту же кнопку молча пропускается — без запроса и без единицы. Затем лимит:
+    исчерпан — кнопка и номер темы не меняются, ответ ``AI_LIMIT``. Единицу списывает этот
+    обработчик, ``handle_text`` её не трогает (``ai_taken=True``).
     """
     n = keyboards.parse_topic(callback.data)
     await callback.answer()
@@ -414,7 +435,12 @@ async def on_topic(callback: CallbackQuery, state: FSMContext, deps: Deps) -> No
     user = await deps.storage.get_user(user_id)
     if user is None:
         return
-    if not await take_ai(deps.storage, user_id, to_local(deps.clock()).date(), deps.ai_limit):
+    # Двойное нажатие до того, как кнопка убрана: второе — без запроса и без единицы лимита.
+    now = deps.clock()
+    msg = callback.message
+    if not await deps.storage.mark_processed(f"topic:{msg.chat.id}:{msg.message_id}", now):
+        return
+    if not await take_ai(deps.storage, user_id, to_local(now).date(), deps.ai_limit):
         log.info("ai limit reached", extra={"user_id": user_id, "error_kind": "ai_limit"})
         await callback.message.answer(texts.AI_LIMIT)
         return

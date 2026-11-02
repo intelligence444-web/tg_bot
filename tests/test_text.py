@@ -327,3 +327,106 @@ async def test_unknown_command_still_fallback(bot_env):
     await dp.feed_update(bot, make_message("/unknown"))
     assert session.texts()[-1] == texts.FALLBACK
     assert deps.vision.completions == []
+
+
+# --- финальное ревью v1.1: повтор рациона, шаги с вопросом, префикс голоса ---
+
+
+def _ai_used(deps) -> int:
+    return deps.storage._ai_usage.get((1, TODAY), 0)
+
+
+class _SlowRetryVision(FakeVision):
+    """Первый запрос — сразу, остальные «висят» (повтор рациона не укладывается в срок)."""
+
+    async def complete(self, system, messages, max_tokens=1500):
+        if self.completions:
+            import asyncio
+
+            self.completions.append({"system": system, "messages": list(messages), "max_tokens": max_tokens})
+            await asyncio.sleep(5)
+        return await super().complete(system, messages, max_tokens)
+
+
+async def _bad_plan(deps) -> str:
+    user = await deps.storage.get_user(1)
+    return plan_json(user.norm.kcal, user.norm.protein_g, scale=0.8)
+
+
+async def test_plan_retry_unavailable_shows_first_plan(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    deps.vision.texts.extend([await _bad_plan(deps), VisionUnavailable("down", no_credits=False)])
+    await dp.feed_update(bot, make_message("составь меню"))
+    assert len(deps.vision.completions) == 2
+    out = session.last_message().text
+    assert texts.PLAN_TITLE in out and texts.PLAN_APPROX.format(pct="20") in out
+    assert texts.OVERLOADED not in session.texts()
+    assert _ai_used(deps) == 1
+
+
+async def test_plan_retry_timeout_shows_first_plan(bot_env, monkeypatch):
+    import bot.handlers.text as text_mod
+
+    dp, bot, session, deps = await _setup(bot_env, [])
+    bad = await _bad_plan(deps)
+    deps.vision = _SlowRetryVision([], texts=[bad, bad])
+    monkeypatch.setattr(text_mod, "VISION_BUDGET_S", 0.5)
+    monkeypatch.setattr(text_mod, "PLAN_RETRY_MARGIN_S", 0.4)
+    await dp.feed_update(bot, make_message("составь меню"))
+    assert len(deps.vision.completions) == 2
+    out = session.last_message().text
+    assert texts.PLAN_TITLE in out and texts.PLAN_APPROX.format(pct="20") in out
+    assert texts.OVERLOADED not in session.texts()
+    assert _ai_used(deps) == 1
+
+
+async def test_plan_retry_non_plan_shows_first_plan(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [])
+    deps.vision.texts.extend([await _bad_plan(deps), chat_json("Вот ответ")])
+    await dp.feed_update(bot, make_message("составь меню"))
+    out = session.last_message().text
+    assert texts.PLAN_TITLE in out and texts.PLAN_APPROX.format(pct="20") in out
+    assert "Вот ответ" not in out
+    assert _ai_used(deps) == 1
+
+
+async def test_steps_question_goes_to_model(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, [chat_json("Около 400 ккал")])
+    await dp.feed_update(bot, make_message("Сколько сжигают 10 000 шагов?"))
+    assert len(deps.vision.completions) == 1
+    assert await deps.storage.activities_on(1, TODAY) == []
+    assert session.last_message().text == "Около 400 ккал"
+
+
+async def test_prefix_passed_through_weight_shortcut(bot_env):
+    from bot.handlers.text import handle_text
+
+    dp, bot, session, deps = await _setup(bot_env, [])
+    msg = make_message("x").message.as_(bot)
+    await handle_text(msg, fsm_context(dp), deps, "вес 85", prefix="🎙 Понял так: вес 85")
+    assert session.texts()[-1].startswith("🎙 Понял так: вес 85\n\n")
+    assert [w.weight_kg for w in await deps.storage.weights(1) if w.day == TODAY] == [85]
+
+
+async def test_prefix_passed_through_weight_shortcut_without_profile(bot_env):
+    from bot.handlers.text import handle_text
+
+    dp, bot, session, deps = await _setup(bot_env, [], onboarded=False)
+    msg = make_message("x").message.as_(bot)
+    await handle_text(msg, fsm_context(dp), deps, "85", prefix="🎙 Понял так: 85")
+    assert session.texts()[-1].startswith("🎙 Понял так: 85\n\n")
+
+
+async def test_prefix_passed_through_profile_line(bot_env):
+    from bot.handlers.text import handle_text
+
+    dp, bot, session, deps = await _setup(bot_env, [], onboarded=False)
+    msg = make_message("x").message.as_(bot)
+    await handle_text(msg, fsm_context(dp), deps, "жен, 1996, 165, 70", prefix="🎙 Понял так: жен 1996 165 70")
+    assert session.texts()[-1].startswith("🎙 Понял так: жен 1996 165 70\n\n")
+    assert await get_fsm_state(dp) is not None
+    session.clear()
+    await fsm_context(dp).clear()
+    await handle_text(msg, fsm_context(dp), deps, "жен, 165, 70", prefix="🎙 Понял так: жен 165 70")
+    assert session.texts()[-1].startswith("🎙 Понял так: жен 165 70\n\n")
+    assert deps.vision.completions == []

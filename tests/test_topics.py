@@ -267,3 +267,12 @@ async def test_topic_button_kept_through_meal_type_change(bot_env):
     session.clear()
     await dp.feed_update(bot, _with_markup(make_callback(f"mt:{meal.meal_id}:dinner"), edit.reply_markup))
     assert _topic_buttons(_last_markup(session)) == [(f"💡 {texts.TOPICS[0]}", "topic:0")]
+
+
+async def test_topic_double_press_one_model_call_one_unit(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, replies=[chat_json("Ответ")])
+    await dp.feed_update(bot, make_callback("topic:0", message_id=55))
+    await dp.feed_update(bot, make_callback("topic:0", message_id=55))
+    assert len(deps.vision.completions) == 1
+    assert [t for t in session.texts() if "Ответ" in t] == ["Ответ"]
+    assert await deps.storage.incr_ai_usage(1, TODAY) == 2  # одна единица (+1 — эта проверка)

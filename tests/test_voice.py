@@ -128,3 +128,65 @@ async def test_voice_in_weight_input_clears_state_and_is_processed_as_text(bot_e
     assert await get_fsm_state(dp) is None
     assert len(speech.calls) == 1
     assert session.texts()[-1].startswith("🎙 Понял так: привет")
+
+
+# --- финальное ревью v1.1: общий срок голоса и префикс в шаблонах ---
+
+
+class _SlowSpeech(FakeSpeech):
+    def __init__(self, results, delay: float):
+        super().__init__(results)
+        self.delay = delay
+
+    async def recognize(self, ogg_opus: bytes) -> str:
+        import asyncio
+
+        await asyncio.sleep(self.delay)
+        return await super().recognize(ogg_opus)
+
+
+async def test_slow_recognition_times_out(bot_env, monkeypatch):
+    import bot.handlers.voice as voice_mod
+
+    monkeypatch.setattr(voice_mod, "VOICE_RECOGNIZE_S", 0.05)
+    dp, bot, session, deps = await _setup(bot_env, _SlowSpeech(["привет"], delay=5), [chat_json("Привет!")])
+    await dp.feed_update(bot, make_message(voice=5))
+    assert session.texts() == [texts.VOICE_FAILED]
+    assert deps.vision.completions == []
+    assert await _ai_used(deps) == 0
+
+
+async def test_router_budget_shrinks_by_recognition_time(bot_env, monkeypatch):
+    import bot.handlers.voice as voice_mod
+    from bot.handlers.meals import VISION_BUDGET_S
+
+    seen: list[float] = []
+
+    async def fake_handle_text(message, state, deps, text, *, prefix="", budget=None):
+        seen.append(budget)
+
+    monkeypatch.setattr(voice_mod, "handle_text", fake_handle_text)
+    monkeypatch.setattr(voice_mod, "VOICE_TOTAL_S", 1.0)
+    dp, bot, session, deps = await _setup(bot_env, _SlowSpeech(["привет"], delay=0.3))
+    await dp.feed_update(bot, make_message(voice=5))
+    assert len(seen) == 1 and 0 < seen[0] <= 0.71
+
+    # обычное голосовое: срок маршрутизатора не больше, чем у текста
+    seen.clear()
+    monkeypatch.setattr(voice_mod, "VOICE_TOTAL_S", 110.0)
+    deps.speech = FakeSpeech(["привет"])
+    await dp.feed_update(bot, make_message(voice=5))
+    assert seen == [VISION_BUDGET_S]
+
+
+async def test_voice_prefix_on_weight_shortcut(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, FakeSpeech(["вес 85,5"]))
+    await dp.feed_update(bot, make_message(voice=4))
+    assert session.texts()[-1].startswith("🎙 Понял так: вес 85,5\n\n")
+
+
+async def test_voice_prefix_on_profile_line(bot_env):
+    dp, bot, session, deps = await _setup(bot_env, FakeSpeech(["жен 1996 165 70"]))
+    await dp.feed_update(bot, make_message(voice=4))
+    assert session.texts()[-1].startswith("🎙 Понял так: жен 1996 165 70\n\n")
+    assert await get_fsm_state(dp) is not None

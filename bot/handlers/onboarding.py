@@ -77,20 +77,28 @@ def _confirm_text(data: dict[str, Any]) -> str:
     )
 
 
-async def start_profile_flow(message: Message, state: FSMContext, parsed: ParsedProfile) -> None:
-    """Показывает разобранную строку профиля и спрашивает «верно?» (прежние данные FSM сбрасываются)."""
+def _with_prefix(text: str, prefix: str) -> str:
+    return f"{prefix}\n\n{text}" if prefix else text
+
+
+async def start_profile_flow(message: Message, state: FSMContext, parsed: ParsedProfile, prefix: str = "") -> None:
+    """Показывает разобранную строку профиля и спрашивает «верно?» (прежние данные FSM сбрасываются).
+
+    ``prefix`` — простой текст первой строкой ответа (голос: «🎙 Понял так: …»).
+    """
     data = {"sex": parsed.sex, "age": parsed.age, "height": parsed.height_cm, "weight": parsed.weight_kg}
     await state.set_state(ProfileFlow.confirm)
     await state.set_data(data)
-    await message.answer(_confirm_text(data), reply_markup=keyboards.profile_confirm())
+    await message.answer(_with_prefix(_confirm_text(data), prefix), reply_markup=keyboards.profile_confirm())
 
 
 async def handle_profile_text(
-    message: Message, state: FSMContext, deps: Deps, text: str | None = None
+    message: Message, state: FSMContext, deps: Deps, text: str | None = None, *, prefix: str = ""
 ) -> bool:
     """Строка профиля → подтверждение; похожая, но неразборчивая → пример с диапазонами.
 
-    ``text`` — разбираемый текст (по умолчанию ``message.text``; для голоса — распознанный).
+    ``text`` — разбираемый текст (по умолчанию ``message.text``; для голоса — распознанный),
+    ``prefix`` — простой текст первой строкой ответа (голос: «🎙 Понял так: …»).
     ``True``, если текст был профилем или «partial» (ответ отправлен), иначе ``False``.
     """
     today = to_local(deps.clock()).date()
@@ -98,9 +106,9 @@ async def handle_profile_text(
     if parsed is None:
         return False
     if parsed == "partial":
-        await message.answer(profile_example(today))
+        await message.answer(_with_prefix(profile_example(today), prefix))
         return True
-    await start_profile_flow(message, state, parsed)
+    await start_profile_flow(message, state, parsed, prefix)
     return True
 
 
